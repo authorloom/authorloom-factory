@@ -146,12 +146,29 @@ function getServiceAccountDriveClient() {
   });
 }
 
+function getWorkspaceImpersonatedDriveClient() {
+  return google.drive({
+    version: "v3",
+    auth: getGoogleServiceAccountAuth({ impersonateWorkspace: true }),
+  });
+}
+
 function getOAuthDriveClient() {
   return google.drive({ version: "v3", auth: getGoogleOAuthClient() });
 }
 
 function getDriveWriteClient() {
+  if (env.GOOGLE_WORKSPACE_IMPERSONATE_EMAIL) {
+    return getWorkspaceImpersonatedDriveClient();
+  }
+
   return getServiceAccountDriveClient();
+}
+
+function driveWriteAuthLabel() {
+  return env.GOOGLE_WORKSPACE_IMPERSONATE_EMAIL
+    ? `workspace impersonation (${env.GOOGLE_WORKSPACE_IMPERSONATE_EMAIL})`
+    : `service account (${getGoogleServiceAccountEmail() ?? "unknown"})`;
 }
 
 export function extractDriveIdFromUrl(input: string) {
@@ -330,7 +347,7 @@ export async function createDriveFolder(parentFolderId: string, name: string) {
   } catch (error) {
     throw wrapGoogleError(
       error,
-      `Could not create Google Drive folder ${name}`,
+      `Could not create Google Drive folder ${name} using ${driveWriteAuthLabel()}`,
     );
   }
 }
@@ -396,7 +413,7 @@ export async function uploadFileToDrive(input: {
   } catch (error) {
     throw wrapGoogleError(
       error,
-      `Could not upload ${input.filename} to Google Drive`,
+      `Could not upload ${input.filename} to Google Drive using ${driveWriteAuthLabel()}`,
     );
   }
 }
@@ -416,7 +433,7 @@ export async function setDriveFileReadableByLink(fileId: string) {
   } catch (error) {
     throw wrapGoogleError(
       error,
-      `Could not make Google Drive file ${fileId} readable by link`,
+      `Could not make Google Drive file ${fileId} readable by link using ${driveWriteAuthLabel()}`,
     );
   }
 }
@@ -440,7 +457,7 @@ export async function trashDriveFile(fileId: string) {
     } catch {
       throw wrapGoogleError(
         primaryError,
-        `Could not move Google Drive file ${fileId} to trash`,
+        `Could not move Google Drive file ${fileId} to trash using ${driveWriteAuthLabel()}`,
       );
     }
   }
@@ -462,7 +479,7 @@ export async function addDriveFileToFolder(fileId: string, folderId: string) {
   } catch (error) {
     throw wrapGoogleError(
       error,
-      `Could not add Google Drive file ${fileId} to folder ${folderId}`,
+      `Could not add Google Drive file ${fileId} to folder ${folderId} using ${driveWriteAuthLabel()}`,
     );
   }
 }
