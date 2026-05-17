@@ -151,11 +151,7 @@ function getOAuthDriveClient() {
 }
 
 function getDriveWriteClient() {
-  try {
-    return getOAuthDriveClient();
-  } catch {
-    return getServiceAccountDriveClient();
-  }
+  return getServiceAccountDriveClient();
 }
 
 export function extractDriveIdFromUrl(input: string) {
@@ -319,7 +315,7 @@ export async function findDriveChildByName(
 
 export async function createDriveFolder(parentFolderId: string, name: string) {
   try {
-    const drive = getDriveClient();
+    const drive = getDriveWriteClient();
     const response = await drive.files.create({
       requestBody: {
         name,
@@ -407,7 +403,7 @@ export async function uploadFileToDrive(input: {
 
 export async function setDriveFileReadableByLink(fileId: string) {
   try {
-    const drive = getDriveClient({ write: true });
+    const drive = getDriveWriteClient();
 
     await drive.permissions.create({
       fileId,
@@ -437,7 +433,7 @@ export async function trashDriveFile(fileId: string) {
   }
 
   try {
-    await trashWithClient(getDriveClient({ write: true }));
+    await trashWithClient(getDriveWriteClient());
   } catch (primaryError) {
     try {
       await trashWithClient(getDriveClient());
@@ -452,7 +448,7 @@ export async function trashDriveFile(fileId: string) {
 
 export async function addDriveFileToFolder(fileId: string, folderId: string) {
   try {
-    const drive = getDriveClient({ write: true });
+    const drive = getDriveWriteClient();
     const existingFile = await getDriveFile(fileId);
     const response = await drive.files.update({
       fileId,
