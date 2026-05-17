@@ -1047,20 +1047,34 @@ async function processJob(job: ClaimedJob) {
     workerSecret: requiredWorkerSecret,
   });
 
-  if (job.job.type !== "render_campaign_videos") {
-    await client.mutation(api.productionJobs.fail, {
-      jobId: job.job.id,
-      workerId,
-      workerSecret: requiredWorkerSecret,
-      error: `Unsupported Authorloom factory job type: ${job.job.type}`,
-      errorCode: "UNSUPPORTED_JOB_TYPE",
-      errorDetails: { jobType: job.job.type },
-      output: {},
-    });
-    return;
-  }
+  const heartbeat = setInterval(() => {
+    void client
+      .mutation(api.productionJobs.heartbeat, {
+        jobId: job.job.id,
+        workerId,
+        workerSecret: requiredWorkerSecret,
+      })
+      .catch((error) => {
+        const message =
+          error instanceof Error ? error.message : "Unknown heartbeat failure.";
+        console.warn(`Heartbeat failed for ${job.job.id}: ${message}`);
+      });
+  }, 30_000);
 
   try {
+    if (job.job.type !== "render_campaign_videos") {
+      await client.mutation(api.productionJobs.fail, {
+        jobId: job.job.id,
+        workerId,
+        workerSecret: requiredWorkerSecret,
+        error: `Unsupported Authorloom factory job type: ${job.job.type}`,
+        errorCode: "UNSUPPORTED_JOB_TYPE",
+        errorDetails: { jobType: job.job.type },
+        output: {},
+      });
+      return;
+    }
+
     await processRenderCampaign(job);
   } catch (error) {
     const message =
@@ -1081,6 +1095,8 @@ async function processJob(job: ClaimedJob) {
       },
     });
     console.error(`Render campaign job ${job.job.id} failed: ${message}`);
+  } finally {
+    clearInterval(heartbeat);
   }
 }
 
