@@ -1,0 +1,859 @@
+import type { ExecaError } from "execa";
+import fs from "node:fs/promises";
+import path from "node:path";
+
+import {
+  getRenderJobDetails,
+  markRenderJobDone,
+  markRenderJobFailed,
+  markRenderJobRunning,
+} from "@/lib/db";
+import { paths } from "@/lib/paths";
+
+const minRenderDurationSeconds = 6;
+const maxRenderDurationSeconds = 8;
+const thumbnailIntroDurationSeconds = 0.01;
+
+const canvasWidth = 1080;
+const canvasHeight = 1920;
+
+// Organic Reels/TikTok safe area.
+const safeTop = 160;
+const safeBottom = 340;
+const safeContentBottom = canvasHeight - safeBottom;
+
+const maxScreenshotWidth = 760;
+const minScreenshotWidth = 440;
+const hookScreenshotGap = 24;
+
+type HookOverlayResult = {
+  filepath: string;
+  width: number;
+  height: number;
+};
+
+type OverlayInput = {
+  inputIndex: number;
+  height: number;
+};
+
+type MediaDimensions = {
+  width: number;
+  height: number;
+};
+
+type Layout = {
+  screenshotWidth: number;
+  screenshotY: number;
+  hookY: number;
+  hookHeight: number;
+  footerHeight: number;
+};
+
+type RenderOptions = {
+  backgroundStartTime?: number;
+  backgroundEndTime?: number;
+  playbackSpeed?: number;
+  screenshotPlacement?: string;
+  screenshotScale?: number;
+  zoomLevel?: number;
+  cropVariant?: string;
+  durationSeconds?: number;
+  hookPlacement?: string;
+  hookSize?: number;
+  metadataLinePlacement?: string;
+  metadataLineSize?: number;
+  layoutTemplate?: string;
+  variationParameters?: Partial<RenderOptions> | null;
+  proofAdjustments?: Partial<RenderOptions> | null;
+  postCopy?: {
+    keywords?: string[];
+    keywordOrder?: string[];
+    renderedBookTitleLine?: string | null;
+  } | null;
+};
+
+async function runCommand(
+  file: string,
+  args: string[],
+  options: { all?: boolean } = {},
+) {
+  const { execa } = await import("execa");
+  return execa(file, args, options);
+}
+
+function getRandomRenderDurationSeconds() {
+  return Math.floor(
+    Math.random() * (maxRenderDurationSeconds - minRenderDurationSeconds + 1),
+  ) + minRenderDurationSeconds;
+}
+
+function commandErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    const execaError = error as ExecaError;
+    const output =
+      typeof execaError.all === "string"
+        ? execaError.all
+        : [execaError.stdout, execaError.stderr]
+            .filter((value): value is string => typeof value === "string")
+            .join("\n");
+
+    return [error.message, output ? `Output:\n${output}` : null]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  return "FFmpeg render failed.";
+}
+
+async function getMediaDimensions(filepath: string): Promise<MediaDimensions> {
+  const result = await runCommand(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height",
+      "-of",
+      "json",
+      filepath,
+    ],
+    { all: true },
+  );
+
+  const parsed = JSON.parse(result.stdout || "{}") as {
+    streams?: Array<{ width?: number; height?: number }>;
+  };
+
+  const stream = parsed.streams?.[0];
+
+  if (!stream?.width || !stream?.height) {
+    throw new Error(`Could not read media dimensions for ${filepath}`);
+  }
+
+  return {
+    width: stream.width,
+    height: stream.height,
+  };
+}
+
+async function fileExists(filepath: string | null) {
+  if (!filepath) {
+    return false;
+  }
+
+  return fs
+    .access(filepath)
+    .then(() => true)
+    .catch(() => false);
+}
+
+function isHeicFile(filepath: string) {
+  return [".heic", ".heif"].includes(path.extname(filepath).toLowerCase());
+}
+
+async function prepareScreenshotForRender({
+  campaignId,
+  jobId,
+  screenshotFilepath,
+}: {
+  campaignId: string;
+  jobId: string;
+  screenshotFilepath: string;
+}) {
+  if (!isHeicFile(screenshotFilepath)) {
+    return {
+      filepath: screenshotFilepath,
+      temporary: false,
+    };
+  }
+
+  const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
+  const outputFilepath = path.join(tempDirectory, `${jobId}-screenshot.png`);
+
+  await fs.mkdir(tempDirectory, { recursive: true });
+
+  const converters =
+    process.platform === "darwin"
+      ? [
+          {
+            file: "sips",
+            args: ["-s", "format", "png", screenshotFilepath, "--out", outputFilepath],
+          },
+          { file: "magick", args: [screenshotFilepath, outputFilepath] },
+          { file: "convert", args: [screenshotFilepath, outputFilepath] },
+          { file: "ffmpeg", args: ["-y", "-i", screenshotFilepath, outputFilepath] },
+        ]
+      : [
+          { file: "magick", args: [screenshotFilepath, outputFilepath] },
+          { file: "convert", args: [screenshotFilepath, outputFilepath] },
+          { file: "ffmpeg", args: ["-y", "-i", screenshotFilepath, outputFilepath] },
+        ];
+  const errors: string[] = [];
+
+  for (const converter of converters) {
+    try {
+      await runCommand(converter.file, converter.args, { all: true });
+      return {
+        filepath: outputFilepath,
+        temporary: true,
+      };
+    } catch (error) {
+      errors.push(`${converter.file}: ${commandErrorMessage(error)}`);
+    }
+  }
+
+  throw new Error(
+    `Could not convert HEIC screenshot for render.\n${errors.join("\n\n")}`,
+  );
+}
+
+function calculateLayout({
+  screenshotDimensions,
+  hookHeight,
+  footerHeight = 0,
+}: {
+  screenshotDimensions: MediaDimensions;
+  hookHeight: number;
+  footerHeight?: number;
+}): Layout {
+  const hookY = safeTop + 20;
+  const screenshotY = hookY + hookHeight + hookScreenshotGap;
+  const maxScreenshotBottom = safeContentBottom - footerHeight - 32;
+  const availableScreenshotHeight = Math.max(
+    320,
+    maxScreenshotBottom - screenshotY,
+  );
+
+  const widthThatFitsHeight =
+    screenshotDimensions.width *
+    (availableScreenshotHeight / screenshotDimensions.height);
+
+  const screenshotWidth = Math.max(
+    Math.min(minScreenshotWidth, Math.floor(widthThatFitsHeight)),
+    Math.min(maxScreenshotWidth, Math.floor(widthThatFitsHeight)),
+  );
+
+  return {
+    screenshotWidth,
+    hookY,
+    screenshotY,
+    hookHeight,
+    footerHeight,
+  };
+}
+
+function buildImageTextFilterComplex({
+  layout,
+  options,
+  screenshotDimensions,
+  metadataOverlay,
+  keywordsOverlay,
+  outputLabel = "vout",
+}: {
+  layout: Layout;
+  options?: RenderOptions;
+  screenshotDimensions: MediaDimensions;
+  metadataOverlay?: OverlayInput | null;
+  keywordsOverlay?: OverlayInput | null;
+  outputLabel?: string;
+}) {
+  const effectiveOptions = {
+    ...(options ?? {}),
+    ...(options?.variationParameters ?? {}),
+    ...(options?.proofAdjustments ?? {}),
+  };
+  const playbackSpeed = clampNumber(effectiveOptions.playbackSpeed, 0.95, 1.05, 1);
+  const zoomLevel = clampNumber(effectiveOptions.zoomLevel, 1, 1.08, 1);
+  const screenshotScale = clampNumber(
+    effectiveOptions.screenshotScale,
+    0.7,
+    1.25,
+    1,
+  );
+  const screenshotPlacement = effectiveOptions.screenshotPlacement ?? "center";
+  const hookPlacement = effectiveOptions.hookPlacement ?? "auto";
+  const cropVariant = effectiveOptions.cropVariant ?? "center";
+  const scaledCanvasWidth = Math.round(canvasWidth * zoomLevel);
+  const scaledCanvasHeight = Math.round(canvasHeight * zoomLevel);
+  const cropX =
+    cropVariant === "left"
+      ? "0"
+      : cropVariant === "right"
+        ? "iw-ow"
+        : "(iw-ow)/2";
+  const cropY =
+    cropVariant === "top"
+      ? "0"
+      : cropVariant === "bottom"
+        ? "ih-oh"
+        : "(ih-oh)/2";
+  const shotX =
+    screenshotPlacement === "left-safe"
+      ? "90"
+      : screenshotPlacement === "right-safe"
+        ? "W-w-230"
+        : "(W-w)/2";
+  const hookY =
+    hookPlacement === "top"
+      ? safeTop
+      : hookPlacement === "upper-middle"
+        ? safeTop + 120
+        : hookPlacement === "middle"
+          ? Math.round(canvasHeight * 0.32)
+          : layout.hookY;
+  const copyBlockHeight =
+    (metadataOverlay?.height ?? 0) + (keywordsOverlay?.height ?? 0);
+  const minShotY = Math.round(hookY + layout.hookHeight + hookScreenshotGap);
+  const maxShotBottom = Math.max(
+    minShotY + 300,
+    safeContentBottom - copyBlockHeight - 40,
+  );
+  const availableShotHeight = Math.max(300, maxShotBottom - minShotY);
+  const widthThatFitsAvailableHeight = Math.floor(
+    screenshotDimensions.width * (availableShotHeight / screenshotDimensions.height),
+  );
+  const screenshotWidth = Math.max(
+    320,
+    Math.min(
+      maxScreenshotWidth,
+      widthThatFitsAvailableHeight,
+      Math.round(layout.screenshotWidth * screenshotScale),
+    ),
+  );
+  const screenshotHeight = Math.round(
+    screenshotDimensions.height * (screenshotWidth / screenshotDimensions.width),
+  );
+  const shotYOffset =
+    screenshotPlacement === "upper-center"
+      ? -80
+      : screenshotPlacement === "lower-center"
+        ? 80
+        : 0;
+  const maxShotY = Math.max(minShotY, maxShotBottom - screenshotHeight);
+  const requestedShotY = layout.screenshotY + shotYOffset;
+  const shotY = Math.max(minShotY, Math.min(maxShotY, requestedShotY));
+
+  const metadataY = Math.min(
+    canvasHeight -
+      safeTop -
+      (metadataOverlay?.height ?? 0) -
+      (keywordsOverlay?.height ?? 0),
+    Math.round(shotY + screenshotHeight + 34),
+  );
+  const keywordsY = Math.min(
+    canvasHeight - safeTop - (keywordsOverlay?.height ?? 0),
+    metadataY + (metadataOverlay?.height ?? 0) + 8,
+  );
+  const textFilters: string[] = [];
+  let currentLabel = "withhook";
+
+  if (metadataOverlay) {
+    textFilters.push(
+      `[${metadataOverlay.inputIndex}:v]format=rgba[metadata]`,
+      `[${currentLabel}][metadata]overlay=x=(W-w)/2:y=${metadataY}[withmetadata]`,
+    );
+    currentLabel = "withmetadata";
+  }
+
+  if (keywordsOverlay) {
+    textFilters.push(
+      `[${keywordsOverlay.inputIndex}:v]format=rgba[keywords]`,
+      `[${currentLabel}][keywords]overlay=x=(W-w)/2:y=${keywordsY}[${outputLabel}]`,
+    );
+    currentLabel = outputLabel;
+  }
+
+  if (currentLabel !== outputLabel) {
+    textFilters.push(`[${currentLabel}]null[${outputLabel}]`);
+  }
+
+  return [
+    `[0:v]setpts=${(1 / playbackSpeed).toFixed(5)}*PTS,scale=${scaledCanvasWidth}:${scaledCanvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY}[bg]`,
+    `[1:v]scale=${screenshotWidth}:-2:force_original_aspect_ratio=decrease,setsar=1[shot]`,
+    "[2:v]format=rgba[hook]",
+    `[bg][shot]overlay=x=${shotX}:y=${Math.round(shotY)}[withshot]`,
+    `[withshot][hook]overlay=x=(W-w)/2:y=${Math.round(hookY)}[withhook]`,
+    ...textFilters,
+  ].join(";");
+}
+
+function wrapText(text: string, maxLineLength: number) {
+  const words = text.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  const lines: string[] = [];
+  let currentLine = "";
+
+  for (const word of words) {
+    const nextLine = currentLine ? `${currentLine} ${word}` : word;
+    if (nextLine.length > maxLineLength && currentLine) {
+      lines.push(currentLine);
+      currentLine = word;
+    } else {
+      currentLine = nextLine;
+    }
+  }
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines.join("\n");
+}
+
+async function createTextOverlayImage({
+  campaignId,
+  jobId,
+  suffix,
+  text,
+  width,
+  height,
+  fontSize,
+}: {
+  campaignId: string;
+  jobId: string;
+  suffix: string;
+  text: string;
+  width: number;
+  height: number;
+  fontSize: number;
+}) {
+  const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
+  const overlayFilepath = path.join(tempDirectory, `${jobId}-${suffix}.png`);
+  const overlayConfigFilepath = path.join(tempDirectory, `${jobId}-${suffix}.json`);
+
+  await fs.mkdir(tempDirectory, { recursive: true });
+  await fs.writeFile(
+    overlayConfigFilepath,
+    JSON.stringify({
+      fontCandidates: hookFontCandidates(),
+      fontSize: String(fontSize),
+      height,
+      outputFilepath: overlayFilepath,
+      text,
+      width,
+    }),
+  );
+
+  try {
+    await runCommand(
+      "node",
+      [
+        path.join(paths.projectRoot, "scripts", "render-hook-overlay.mjs"),
+        overlayConfigFilepath,
+      ],
+      { all: true },
+    );
+  } finally {
+    await fs.rm(overlayConfigFilepath, { force: true });
+  }
+
+  return {
+    filepath: overlayFilepath,
+    width,
+    height,
+  };
+}
+
+async function createPostCopyOverlays({
+  campaignId,
+  jobId,
+  renderOptions,
+}: {
+  campaignId: string;
+  jobId: string;
+  renderOptions: RenderOptions;
+}) {
+  const postCopy = renderOptions.postCopy ?? null;
+  const metadataLine = postCopy?.renderedBookTitleLine?.trim() ?? "";
+  const keywords = (
+    postCopy?.keywordOrder?.length ? postCopy.keywordOrder : postCopy?.keywords
+  )?.filter((keyword): keyword is string => Boolean(keyword?.trim()));
+
+  const metadataOverlay = metadataLine
+    ? await createTextOverlayImage({
+        campaignId,
+        jobId,
+        suffix: "metadata",
+        text: wrapText(metadataLine, 44),
+        width: 820,
+        height: metadataLine.length > 44 ? 96 : 54,
+        fontSize: 34,
+      })
+    : null;
+  const keywordText = keywords?.length ? wrapText(keywords.join(" • "), 54) : "";
+  const keywordsOverlay = keywordText
+    ? await createTextOverlayImage({
+        campaignId,
+        jobId,
+        suffix: "keywords",
+        text: keywordText,
+        width: 860,
+        height: keywordText.includes("\n") ? 110 : 58,
+        fontSize: 30,
+      })
+    : null;
+
+  return {
+    metadataOverlay,
+    keywordsOverlay,
+  };
+}
+
+function clampNumber(
+  value: number | undefined,
+  min: number,
+  max: number,
+  fallback: number,
+) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, value));
+}
+
+function parseRenderOptions(value: string | null): RenderOptions {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value) as RenderOptions;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function buildThumbnailIntroFilterComplex({
+  mainFilterComplex,
+  thumbnailInputIndex,
+  introDurationSeconds,
+}: {
+  mainFilterComplex: string;
+  thumbnailInputIndex: number;
+  introDurationSeconds: string;
+}) {
+  return [
+    mainFilterComplex,
+    `[${thumbnailInputIndex}:v]scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight},setsar=1[thumbv]`,
+    `[mainv][thumbv]overlay=x=0:y=0:enable='between(t,0,${introDurationSeconds})'[vout]`,
+  ].join(";");
+}
+
+function hookFontCandidates() {
+  return [
+    path.join(paths.projectRoot, "public", "fonts", "ProximaNova-Semibold.ttf"),
+    path.join(paths.projectRoot, "public", "fonts", "ProximaNova-SemiBold.ttf"),
+    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Semibold.ttf"),
+    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-SemiBold.ttf"),
+    path.join(paths.projectRoot, "public", "fonts", "Aveny-T.ttf"),
+    path.join(paths.projectRoot, "public", "fonts", "AvenyT.ttf"),
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+  ];
+}
+
+async function createHookOverlayImage(
+  campaignId: string,
+  jobId: string,
+  hookText: string,
+): Promise<HookOverlayResult> {
+  const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
+  const overlayFilepath = path.join(tempDirectory, `${jobId}-hook.png`);
+  const overlayConfigFilepath = path.join(tempDirectory, `${jobId}-hook.json`);
+
+  await fs.mkdir(tempDirectory, { recursive: true });
+
+  const normalizedHook = hookText.replace(/\s+/g, " ").trim();
+
+  const fontSize =
+    normalizedHook.length > 160
+      ? "42"
+      : normalizedHook.length > 120
+        ? "46"
+        : normalizedHook.length > 90
+          ? "50"
+          : "58";
+
+  const overlayHeight =
+    normalizedHook.length > 160
+      ? 440
+      : normalizedHook.length > 120
+        ? 380
+        : normalizedHook.length > 90
+          ? 330
+          : 260;
+
+  const overlayWidth = 820;
+
+  await fs.writeFile(
+    overlayConfigFilepath,
+    JSON.stringify({
+      fontCandidates: hookFontCandidates(),
+      fontSize,
+      height: overlayHeight,
+      outputFilepath: overlayFilepath,
+      text: normalizedHook,
+      width: overlayWidth,
+    }),
+  );
+
+  try {
+    await runCommand(
+      "node",
+      [
+        path.join(paths.projectRoot, "scripts", "render-hook-overlay.mjs"),
+        overlayConfigFilepath,
+      ],
+      { all: true },
+    );
+  } finally {
+    await fs.rm(overlayConfigFilepath, { force: true });
+  }
+
+  return {
+    filepath: overlayFilepath,
+    width: overlayWidth,
+    height: overlayHeight,
+  };
+}
+
+export async function renderJob(jobId: string) {
+  const job = getRenderJobDetails(jobId);
+
+  if (!job) {
+    throw new Error("Render job not found.");
+  }
+
+  const renderOptions = parseRenderOptions(job.render_options_json);
+  const renderDuration =
+    renderOptions.durationSeconds ??
+    job.render_duration_seconds ??
+    getRandomRenderDurationSeconds();
+  const hasThumbnailIntro = await fileExists(job.thumbnail_filepath);
+  const renderDurationSeconds = String(renderDuration);
+  const thumbnailIntroDuration = String(thumbnailIntroDurationSeconds);
+
+  const outputFilename = `${job.id}.mp4`;
+  const outputDirectory = path.join(paths.rendersDirectory, job.campaign_id);
+  const outputFilepath = path.join(outputDirectory, outputFilename);
+
+  await fs.mkdir(outputDirectory, { recursive: true });
+  markRenderJobRunning(job.id);
+
+  const hookOverlay = await createHookOverlayImage(
+    job.campaign_id,
+    job.id,
+    job.hook_text,
+  );
+  const postCopyOverlays = await createPostCopyOverlays({
+    campaignId: job.campaign_id,
+    jobId: job.id,
+    renderOptions,
+  });
+  const preparedScreenshot = await prepareScreenshotForRender({
+    campaignId: job.campaign_id,
+    jobId: job.id,
+    screenshotFilepath: job.screenshot_filepath,
+  });
+
+  const screenshotDimensions = await getMediaDimensions(preparedScreenshot.filepath);
+  const footerHeight =
+    (postCopyOverlays.metadataOverlay?.height ?? 0) +
+    (postCopyOverlays.keywordsOverlay?.height ?? 0) +
+    96;
+  const layout = hookOverlay
+    ? calculateLayout({
+        screenshotDimensions,
+        hookHeight: hookOverlay.height,
+        footerHeight,
+      })
+    : null;
+
+  const args = [
+    "-y",
+    "-stream_loop",
+    "-1",
+  ];
+
+  if (
+    typeof renderOptions.backgroundStartTime === "number" &&
+    renderOptions.backgroundStartTime > 0
+  ) {
+    args.push("-ss", String(renderOptions.backgroundStartTime));
+  }
+
+  args.push(
+    "-i",
+    job.background_filepath,
+    "-i",
+    preparedScreenshot.filepath,
+  );
+
+  let nextInputIndex = 2;
+
+  if (hookOverlay) {
+    args.push("-i", hookOverlay.filepath);
+    nextInputIndex += 1;
+  }
+
+  const metadataOverlayInputIndex = postCopyOverlays.metadataOverlay
+    ? nextInputIndex
+    : null;
+
+  if (postCopyOverlays.metadataOverlay) {
+    args.push("-i", postCopyOverlays.metadataOverlay.filepath);
+    nextInputIndex += 1;
+  }
+
+  const keywordsOverlayInputIndex = postCopyOverlays.keywordsOverlay
+    ? nextInputIndex
+    : null;
+
+  if (postCopyOverlays.keywordsOverlay) {
+    args.push("-i", postCopyOverlays.keywordsOverlay.filepath);
+    nextInputIndex += 1;
+  }
+
+  const thumbnailInputIndex = hasThumbnailIntro ? nextInputIndex : null;
+
+  if (hasThumbnailIntro && job.thumbnail_filepath) {
+    args.push(
+      "-loop",
+      "1",
+      "-i",
+      job.thumbnail_filepath,
+    );
+    nextInputIndex += 1;
+  }
+
+  const audioInputIndex = job.audio_filepath ? nextInputIndex : null;
+
+  if (job.audio_filepath) {
+    if (job.audio_start_offset_seconds && job.audio_start_offset_seconds > 0) {
+      args.push("-ss", String(job.audio_start_offset_seconds));
+    }
+    args.push("-i", job.audio_filepath);
+  }
+
+  const mainFilterComplex = buildImageTextFilterComplex({
+    layout:
+      layout ?? {
+        hookY: safeTop,
+        hookHeight: hookOverlay?.height ?? 260,
+        screenshotY: 700,
+        screenshotWidth: maxScreenshotWidth,
+        footerHeight,
+    },
+    options: renderOptions,
+    screenshotDimensions,
+    metadataOverlay:
+      postCopyOverlays.metadataOverlay && metadataOverlayInputIndex !== null
+        ? {
+            inputIndex: metadataOverlayInputIndex,
+            height: postCopyOverlays.metadataOverlay.height,
+          }
+        : null,
+    keywordsOverlay:
+      postCopyOverlays.keywordsOverlay && keywordsOverlayInputIndex !== null
+        ? {
+            inputIndex: keywordsOverlayInputIndex,
+            height: postCopyOverlays.keywordsOverlay.height,
+          }
+        : null,
+    outputLabel: hasThumbnailIntro ? "mainv" : "vout",
+  });
+
+  const filterComplex =
+    hasThumbnailIntro && thumbnailInputIndex !== null
+      ? buildThumbnailIntroFilterComplex({
+          mainFilterComplex,
+          thumbnailInputIndex,
+          introDurationSeconds: thumbnailIntroDuration,
+        })
+      : mainFilterComplex;
+
+  args.push(
+    "-filter_complex",
+    filterComplex,
+    "-t",
+    renderDurationSeconds,
+    "-map",
+    "[vout]",
+  );
+
+  if (job.audio_filepath) {
+    args.push(
+      "-map",
+      `${audioInputIndex}:a:0`,
+      "-c:a",
+      "aac",
+      "-shortest",
+    );
+  }
+
+  args.push(
+    "-c:v",
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    "-movflags",
+    "+faststart",
+    outputFilepath,
+  );
+
+  try {
+    console.log("Render job inputs:", {
+      jobId: job.id,
+      background: job.background_filepath,
+      screenshot: preparedScreenshot.filepath,
+      originalScreenshot: job.screenshot_filepath,
+      screenshotDimensions,
+      audio: job.audio_filepath,
+      thumbnail: hasThumbnailIntro ? job.thumbnail_filepath : null,
+      output: outputFilepath,
+      renderDurationSeconds,
+      thumbnailIntroDuration: hasThumbnailIntro
+        ? thumbnailIntroDuration
+        : null,
+      hookOverlay,
+      layout,
+      renderOptions,
+      postCopyOverlays,
+      safeArea: {
+        safeTop,
+        safeBottom,
+        safeContentBottom,
+      },
+    });
+
+    console.log("FFmpeg args:", args.join(" "));
+
+    await runCommand("ffmpeg", args, { all: true });
+
+    markRenderJobDone({
+      jobId: job.id,
+      outputFilename,
+      outputFilepath,
+    });
+
+    return {
+      outputFilename,
+      outputFilepath,
+    };
+  } catch (error) {
+    const message = commandErrorMessage(error);
+    markRenderJobFailed(job.id, message);
+    throw new Error(message);
+  } finally {
+    if (hookOverlay) {
+      await fs.rm(hookOverlay.filepath, { force: true });
+    }
+    await Promise.all(
+      [
+        postCopyOverlays.metadataOverlay?.filepath,
+        postCopyOverlays.keywordsOverlay?.filepath,
+        preparedScreenshot.temporary ? preparedScreenshot.filepath : null,
+      ]
+        .filter((filepath): filepath is string => Boolean(filepath))
+        .map((filepath) => fs.rm(filepath, { force: true })),
+    );
+  }
+}

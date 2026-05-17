@@ -1,0 +1,52 @@
+{
+  "name": "booktok-factory",
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.33.2",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --webpack -p 3001",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/lib/__tests__/*.test.ts",
+    "db:init": "tsx scripts/init-db.ts",
+    "db:reset-local": "tsx scripts/reset-local-data.ts",
+    "handoff:import": "tsx scripts/import-authorloom-handoff.ts",
+    "handoff:render": "tsx scripts/render-authorloom-batch.ts",
+    "handoff:upload": "tsx scripts/upload-authorloom-batch.ts",
+    "authorloom:worker": "tsx scripts/authorloom-production-worker.ts",
+    "authorloom:worker:once": "tsx scripts/authorloom-production-worker.ts --once",
+    "render:test": "tsx scripts/render-test.ts",
+    "google:auth": "tsx scripts/google-auth.ts",
+    "upload:drive-worker": "tsx scripts/upload-drive-videos-worker.ts",
+    "storage:cleanup": "tsx scripts/cleanup-render-storage.ts --execute",
+    "storage:cleanup:dry-run": "tsx scripts/cleanup-render-storage.ts"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "^5.2.2",
+    "better-sqlite3": "^12.9.0",
+    "convex": "^1.38.0",
+    "execa": "^9.6.1",
+    "googleapis": "^171.4.0",
+    "nanoid": "^5.1.9",
+    "next": "16.2.4",
+    "p-queue": "^9.1.2",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-hook-form": "^7.74.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.4",
+    "tailwindcss": "^4",
+    "tsx": "^4.21.0",
+    "typescript": "^5"
+  }
+}

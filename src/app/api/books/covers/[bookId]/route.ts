@@ -1,0 +1,128 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { NextResponse } from "next/server";
+
+import { getBook, updateBookDetails } from "@/lib/db";
+import {
+  assertAllowedExtension,
+  assertSafeOriginalFilename,
+  coverImageExtensions,
+  createStoredFilename,
+  getFileExtension,
+} from "@/lib/files";
+import { paths } from "@/lib/paths";
+
+export const runtime = "nodejs";
+
+const maxCoverBytes = 25 * 1024 * 1024;
+
+type BookCoverContext = {
+  params: Promise<{
+    bookId: string;
+  }>;
+};
+
+function getUploadFile(formData: FormData) {
+  const file = formData.get("file");
+
+  if (!(file instanceof File)) {
+    throw new Error("Upload file is required.");
+  }
+
+  if (file.size <= 0) {
+    throw new Error("Upload file is empty.");
+  }
+
+  return file;
+}
+
+function getCoverContentType(filepath: string) {
+  const extension = getFileExtension(filepath);
+
+  if (extension === "jpg" || extension === "jpeg") {
+    return "image/jpeg";
+  }
+
+  if (extension === "png") {
+    return "image/png";
+  }
+
+  if (extension === "webp") {
+    return "image/webp";
+  }
+
+  return "application/octet-stream";
+}
+
+export async function GET(_request: Request, context: BookCoverContext) {
+  const { bookId } = await context.params;
+  const book = getBook(bookId);
+
+  if (!book?.cover_filepath) {
+    return NextResponse.json({ error: "Cover not found." }, { status: 404 });
+  }
+
+  try {
+    const bytes = await fs.readFile(book.cover_filepath);
+
+    return new Response(bytes, {
+      headers: {
+        "Content-Type": getCoverContentType(book.cover_filepath),
+      },
+    });
+  } catch (error) {
+    console.error("Book cover read failed.", error);
+
+    return NextResponse.json({ error: "Cover file not found." }, { status: 404 });
+  }
+}
+
+export async function POST(request: Request, context: BookCoverContext) {
+  try {
+    const { bookId } = await context.params;
+    const book = getBook(bookId);
+
+    if (!book) {
+      return NextResponse.json({ error: "Book not found." }, { status: 404 });
+    }
+
+    const formData = await request.formData();
+    const file = getUploadFile(formData);
+
+    if (file.size > maxCoverBytes) {
+      return NextResponse.json(
+        { error: "Covers must be 25MB or smaller." },
+        { status: 413 },
+      );
+    }
+
+    assertSafeOriginalFilename(file.name);
+    assertAllowedExtension(file.name, coverImageExtensions);
+
+    const storedFilename = createStoredFilename(file.name);
+    const bookDirectory = path.join(paths.coversDirectory, bookId);
+    const filepath = path.join(bookDirectory, storedFilename);
+    const bytes = Buffer.from(await file.arrayBuffer());
+
+    await fs.mkdir(bookDirectory, { recursive: true });
+    await fs.writeFile(filepath, bytes, { flag: "wx" });
+
+    updateBookDetails({
+      bookId,
+      title: book.title,
+      description: book.description,
+      coverFilepath: filepath,
+    });
+
+    return NextResponse.json({
+      filename: storedFilename,
+      filepath,
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Book cover upload failed.";
+    console.error("Book cover upload failed.", error);
+
+    return NextResponse.json({ error: message }, { status: 400 });
+  }
+}
