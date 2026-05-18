@@ -66,6 +66,7 @@ const envSchema = z.object({
   GOOGLE_OAUTH_CLIENT_SECRET: optionalString,
   GOOGLE_OAUTH_REDIRECT_URI: optionalString,
   GOOGLE_OAUTH_TOKEN_PATH: optionalString,
+  GOOGLE_OAUTH_TOKEN_JSON: optionalString,
   GOOGLE_WORKSPACE_IMPERSONATE_EMAIL: optionalString,
   GOOGLE_FACTORY_IMPERSONATE_WORKSPACE: optionalString,
   GOOGLE_FACTORY_PREFER_OAUTH_WRITES: optionalString,

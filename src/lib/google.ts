@@ -158,15 +158,28 @@ function getOAuthDriveClient() {
 }
 
 function getDriveWriteClient() {
+  if (env.GOOGLE_FACTORY_PREFER_OAUTH_WRITES === "true") {
+    return getOAuthDriveClient();
+  }
+
   if (env.GOOGLE_WORKSPACE_IMPERSONATE_EMAIL) {
     return getWorkspaceImpersonatedDriveClient();
+  }
+
+  try {
+    return getOAuthDriveClient();
+  } catch {
+    // Fall back to service-account writes for read/write operations that do not
+    // create owned files in Drive. Video uploads should use OAuth or delegation.
   }
 
   return getServiceAccountDriveClient();
 }
 
 function driveWriteAuthLabel() {
-  return env.GOOGLE_WORKSPACE_IMPERSONATE_EMAIL
+  return env.GOOGLE_FACTORY_PREFER_OAUTH_WRITES === "true"
+    ? "OAuth"
+    : env.GOOGLE_WORKSPACE_IMPERSONATE_EMAIL
     ? `workspace impersonation (${env.GOOGLE_WORKSPACE_IMPERSONATE_EMAIL})`
     : `service account (${getGoogleServiceAccountEmail() ?? "unknown"})`;
 }

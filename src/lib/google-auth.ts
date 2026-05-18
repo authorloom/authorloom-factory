@@ -100,15 +100,18 @@ export function getGoogleOAuthClient() {
     env.GOOGLE_OAUTH_CLIENT_SECRET,
     env.GOOGLE_OAUTH_REDIRECT_URI ?? "http://localhost:3000/oauth2callback",
   );
+  const tokenJson = env.GOOGLE_OAUTH_TOKEN_JSON?.trim();
   const tokenPath = getGoogleOAuthTokenPath();
 
-  if (!fs.existsSync(tokenPath)) {
+  if (!tokenJson && !fs.existsSync(tokenPath)) {
     throw new Error(
       `Google OAuth token not found at ${tokenPath}. Run pnpm google:auth to authorize Drive/Sheets writes.`,
     );
   }
 
-  oauthClient.setCredentials(JSON.parse(fs.readFileSync(tokenPath, "utf8")));
+  oauthClient.setCredentials(
+    JSON.parse(tokenJson || fs.readFileSync(tokenPath, "utf8")),
+  );
 
   return oauthClient;
 }
