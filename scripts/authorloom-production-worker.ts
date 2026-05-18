@@ -26,6 +26,8 @@ import {
   ensureCampaignDriveOutputFolders,
   uploadRenderJobVideoToDrive,
 } from "../src/lib/google";
+import { env } from "../src/lib/env";
+import { getGoogleServiceAccountAuth } from "../src/lib/google-auth";
 import { paths } from "../src/lib/paths";
 import { slugifyCampaignName, slugifyName } from "../src/lib/slugs";
 
@@ -327,6 +329,62 @@ function sourceRequestHeaders(url: string) {
   return headers;
 }
 
+function getPreviewBucketName() {
+  return env.AUTHORLOOM_PREVIEW_BUCKET ?? env.GOOGLE_CLOUD_STORAGE_BUCKET ?? null;
+}
+
+function getPreviewObjectNameFromUrl(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value, authorloomAppUrl);
+    const marker = "/api/previews/";
+    const markerIndex = parsed.pathname.indexOf(marker);
+
+    if (markerIndex < 0) {
+      return null;
+    }
+
+    return decodeURIComponent(parsed.pathname.slice(markerIndex + marker.length));
+  } catch {
+    return null;
+  }
+}
+
+async function downloadPreviewObjectFromStorage(
+  objectName: string,
+  filepath: string,
+) {
+  const bucketName = getPreviewBucketName();
+
+  if (!bucketName) {
+    throw new Error(
+      "AUTHORLOOM_PREVIEW_BUCKET or GOOGLE_CLOUD_STORAGE_BUCKET is required to read render source objects directly from Cloud Storage.",
+    );
+  }
+
+  const url = `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(
+    bucketName,
+  )}/o/${encodeURIComponent(objectName)}?alt=media`;
+  const auth = getGoogleServiceAccountAuth({ impersonateWorkspace: false });
+  const headers = await auth.getRequestHeaders(url);
+  const response = await fetch(url, { headers: headers as HeadersInit });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(
+      `Could not download Cloud Storage render source ${objectName}: ${response.status} ${response.statusText} ${body.slice(
+        0,
+        300,
+      )}`,
+    );
+  }
+
+  await fs.writeFile(filepath, Buffer.from(await response.arrayBuffer()));
+}
+
 async function ensureSourceFileDownloaded(input: {
   driveFileId?: string | null;
   sourceUrl?: string | null;
@@ -352,20 +410,26 @@ async function ensureSourceFileDownloaded(input: {
       await downloadDriveFile(input.driveFileId, filepath);
     } else if (input.sourceUrl) {
       console.log(`Downloading source asset ${input.sourceUrl} -> ${filepath}`);
-      const response = await fetch(input.sourceUrl, {
-        headers: sourceRequestHeaders(input.sourceUrl),
-      });
-      if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        throw new Error(
-          `Could not download source asset from ${input.sourceUrl}: ${response.status} ${response.statusText} ${body.slice(
-            0,
-            300,
-          )}`,
-        );
+      const previewObjectName = getPreviewObjectNameFromUrl(input.sourceUrl);
+
+      if (previewObjectName) {
+        await downloadPreviewObjectFromStorage(previewObjectName, filepath);
+      } else {
+        const response = await fetch(input.sourceUrl, {
+          headers: sourceRequestHeaders(input.sourceUrl),
+        });
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          throw new Error(
+            `Could not download source asset from ${input.sourceUrl}: ${response.status} ${response.statusText} ${body.slice(
+              0,
+              300,
+            )}`,
+          );
+        }
+        const buffer = Buffer.from(await response.arrayBuffer());
+        await fs.writeFile(filepath, buffer);
       }
-      const buffer = Buffer.from(await response.arrayBuffer());
-      await fs.writeFile(filepath, buffer);
     }
     console.log(`Source asset downloaded: ${filepath}`);
     return filepath;

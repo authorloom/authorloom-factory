@@ -69,6 +69,10 @@ const envSchema = z.object({
   GOOGLE_WORKSPACE_IMPERSONATE_EMAIL: optionalString,
   GOOGLE_FACTORY_IMPERSONATE_WORKSPACE: optionalString,
   GOOGLE_FACTORY_PREFER_OAUTH_WRITES: optionalString,
+  AUTHORLOOM_PREVIEW_BUCKET: optionalString,
+  GOOGLE_CLOUD_STORAGE_BUCKET: optionalString,
+  AUTHORLOOM_PREVIEW_OBJECT_PREFIX: optionalString,
+  GOOGLE_CLOUD_STORAGE_PREFIX: optionalString,
 });
 
 const parsedEnv = envSchema.safeParse(process.env);
