@@ -293,12 +293,7 @@ function buildImageTextFilterComplex({
       : cropVariant === "bottom"
         ? "ih-oh"
         : "(ih-oh)/2";
-  const shotX =
-    screenshotPlacement === "left-safe"
-      ? "90"
-      : screenshotPlacement === "right-safe"
-        ? "W-w-230"
-        : "(W-w)/2";
+  const shotX = "(W-w)/2";
   const hookY =
     hookPlacement === "top"
       ? safeTop
