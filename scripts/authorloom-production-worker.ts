@@ -43,6 +43,10 @@ const convexUrl =
   process.env.AUTHORLOOM_CONVEX_URL?.trim() ||
   process.env.NEXT_PUBLIC_CONVEX_URL?.trim() ||
   process.env.CONVEX_URL?.trim();
+const authorloomAppUrl =
+  process.env.AUTHORLOOM_APP_URL?.trim() ||
+  process.env.NEXT_PUBLIC_APP_URL?.trim() ||
+  "https://app.authorloom.com";
 
 if (!convexUrl) {
   throw new Error(
@@ -286,6 +290,22 @@ function nonNegativeNumber(value: unknown) {
 function safeFilename(value: string | null | undefined, fallback: string) {
   const name = value?.trim() || fallback;
   return name.replace(/[/:\\?%*"<>|]/g, "-");
+}
+
+function isHeicFilename(value: string | null | undefined) {
+  return [".heic", ".heif"].includes(path.extname(value ?? "").toLowerCase());
+}
+
+function resolveSourceUrl(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    return new URL(value, authorloomAppUrl).toString();
+  } catch {
+    return value;
+  }
 }
 
 async function ensureSourceFileDownloaded(input: {
@@ -758,9 +778,17 @@ async function prepareLocalRenderJob(input: {
   localCampaignId: string;
   localBatchId: string;
 }) {
+  const screenshotPreviewUrl = isHeicFilename(input.video.assets.screenshot.filename)
+    ? resolveSourceUrl(input.video.assets.screenshot.previewUrl)
+    : null;
   const screenshotFile = await ensureSourceFileDownloaded({
-    driveFileId: input.video.assets.screenshot.driveFileId,
-    filename: input.video.assets.screenshot.filename,
+    driveFileId: screenshotPreviewUrl
+      ? null
+      : input.video.assets.screenshot.driveFileId,
+    sourceUrl: screenshotPreviewUrl,
+    filename: screenshotPreviewUrl
+      ? `${input.video.screenshotAssetId}.jpg`
+      : input.video.assets.screenshot.filename,
     directory: path.join(paths.screenshotsDirectory, input.localBookId),
     fallbackFilename: `${input.video.screenshotAssetId}.jpg`,
   });
