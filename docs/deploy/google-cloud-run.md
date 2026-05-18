@@ -40,9 +40,16 @@ Create these secrets in Secret Manager:
 - `GOOGLE_OAUTH_CLIENT_SECRET`
 - `GOOGLE_OAUTH_TOKEN_JSON`
 
-For the current beta path, Google Drive writes use OAuth. The OAuth token should
-belong to the Google account that has editor access to campaign output folders.
-Later, prefer a Shared Drive or fully working Workspace domain-wide delegation.
+For the current beta path, Google Drive writes should use Workspace
+impersonation. The service account must have domain-wide delegation enabled and
+must be authorized in Google Workspace Admin for these scopes:
+
+- `https://www.googleapis.com/auth/drive`
+- `https://www.googleapis.com/auth/spreadsheets`
+
+OAuth token support remains available for local tooling and emergency fallback,
+but production uploads should not use the raw service account because service
+accounts do not have personal Drive storage quota.
 
 ## First deploy
 
@@ -103,7 +110,7 @@ gcloud run deploy "$SERVICE" \
   --memory 4Gi \
   --timeout 3600 \
   --no-cpu-throttling \
-  --set-env-vars NODE_ENV=production,GOOGLE_FACTORY_IMPERSONATE_WORKSPACE=false,GOOGLE_FACTORY_PREFER_OAUTH_WRITES=true,AUTHORLOOM_WORKER_POLL_MS=5000 \
+  --set-env-vars NODE_ENV=production,GOOGLE_FACTORY_IMPERSONATE_WORKSPACE=true,GOOGLE_WORKSPACE_IMPERSONATE_EMAIL=admin@authorloom.com,GOOGLE_FACTORY_PREFER_OAUTH_WRITES=false,AUTHORLOOM_WORKER_POLL_MS=5000 \
   --set-secrets AUTHORLOOM_CONVEX_URL=AUTHORLOOM_CONVEX_URL:latest,AUTHORLOOM_WORKER_SECRET=AUTHORLOOM_WORKER_SECRET:latest,GOOGLE_CLIENT_EMAIL=GOOGLE_CLIENT_EMAIL:latest,GOOGLE_PRIVATE_KEY=GOOGLE_PRIVATE_KEY:latest,GOOGLE_PROJECT_ID=GOOGLE_PROJECT_ID:latest,GOOGLE_OAUTH_CLIENT_ID=GOOGLE_OAUTH_CLIENT_ID:latest,GOOGLE_OAUTH_CLIENT_SECRET=GOOGLE_OAUTH_CLIENT_SECRET:latest,GOOGLE_OAUTH_TOKEN_JSON=GOOGLE_OAUTH_TOKEN_JSON:latest
 ```
 
