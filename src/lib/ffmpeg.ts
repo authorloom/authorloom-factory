@@ -182,11 +182,13 @@ async function prepareScreenshotForRender({
             file: "sips",
             args: ["-s", "format", "png", screenshotFilepath, "--out", outputFilepath],
           },
+          { file: "heif-convert", args: [screenshotFilepath, outputFilepath] },
           { file: "magick", args: [screenshotFilepath, outputFilepath] },
           { file: "convert", args: [screenshotFilepath, outputFilepath] },
           { file: "ffmpeg", args: ["-y", "-i", screenshotFilepath, outputFilepath] },
         ]
       : [
+          { file: "heif-convert", args: [screenshotFilepath, outputFilepath] },
           { file: "magick", args: [screenshotFilepath, outputFilepath] },
           { file: "convert", args: [screenshotFilepath, outputFilepath] },
           { file: "ffmpeg", args: ["-y", "-i", screenshotFilepath, outputFilepath] },
@@ -196,6 +198,7 @@ async function prepareScreenshotForRender({
   for (const converter of converters) {
     try {
       await runCommand(converter.file, converter.args, { all: true });
+      await getMediaDimensions(outputFilepath);
       return {
         filepath: outputFilepath,
         temporary: true,

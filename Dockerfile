@@ -13,6 +13,7 @@ RUN corepack enable \
     ffmpeg \
     fontconfig \
     imagemagick \
+    libheif-examples \
     libheif1 \
     fonts-dejavu-core \
   && rm -rf /var/lib/apt/lists/*
