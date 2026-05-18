@@ -82,6 +82,8 @@ type RenderAssetRef = {
   driveFileId?: string | null;
   driveUrl?: string | null;
   previewUrl?: string | null;
+  renderSourceUrl?: string | null;
+  renderSourceMimeType?: string | null;
   audioUrl?: string | null;
   text?: string | null;
 };
@@ -308,6 +310,23 @@ function resolveSourceUrl(value: string | null | undefined) {
   }
 }
 
+function sourceRequestHeaders(url: string) {
+  const headers: Record<string, string> = {};
+
+  try {
+    const parsed = new URL(url);
+    const appOrigin = new URL(authorloomAppUrl).origin;
+
+    if (parsed.origin === appOrigin) {
+      headers.Authorization = `Bearer ${requiredWorkerSecret}`;
+    }
+  } catch {
+    // Leave non-standard URLs alone; fetch will surface the actual issue.
+  }
+
+  return headers;
+}
+
 async function ensureSourceFileDownloaded(input: {
   driveFileId?: string | null;
   sourceUrl?: string | null;
@@ -333,7 +352,9 @@ async function ensureSourceFileDownloaded(input: {
       await downloadDriveFile(input.driveFileId, filepath);
     } else if (input.sourceUrl) {
       console.log(`Downloading source asset ${input.sourceUrl} -> ${filepath}`);
-      const response = await fetch(input.sourceUrl);
+      const response = await fetch(input.sourceUrl, {
+        headers: sourceRequestHeaders(input.sourceUrl),
+      });
       if (!response.ok) {
         const body = await response.text().catch(() => "");
         throw new Error(
@@ -778,9 +799,14 @@ async function prepareLocalRenderJob(input: {
   localCampaignId: string;
   localBatchId: string;
 }) {
-  const screenshotPreviewUrl = isHeicFilename(input.video.assets.screenshot.filename)
-    ? resolveSourceUrl(input.video.assets.screenshot.previewUrl)
-    : null;
+  const screenshotRenderSourceUrl = resolveSourceUrl(
+    input.video.assets.screenshot.renderSourceUrl,
+  );
+  const screenshotPreviewUrl =
+    screenshotRenderSourceUrl ??
+    (isHeicFilename(input.video.assets.screenshot.filename)
+      ? resolveSourceUrl(input.video.assets.screenshot.previewUrl)
+      : null);
   const screenshotFile = await ensureSourceFileDownloaded({
     driveFileId: screenshotPreviewUrl
       ? null
