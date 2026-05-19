@@ -26,7 +26,7 @@ async function getHookFont(fontCandidates) {
 }
 
 const hookTextShadow =
-  "0 1px 2px rgba(0,0,0,0.95), 0 2px 5px rgba(0,0,0,0.8)";
+  "2px 0 0 rgba(0,0,0,0.95), -2px 0 0 rgba(0,0,0,0.95), 0 2px 0 rgba(0,0,0,0.95), 0 -2px 0 rgba(0,0,0,0.95), 1.4px 1.4px 0 rgba(0,0,0,0.9), -1.4px 1.4px 0 rgba(0,0,0,0.9), 1.4px -1.4px 0 rgba(0,0,0,0.9), -1.4px -1.4px 0 rgba(0,0,0,0.9), 0 3px 5px rgba(0,0,0,0.7)";
 
 const configPath = process.argv[2];
 

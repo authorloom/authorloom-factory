@@ -350,7 +350,9 @@ function buildImageTextFilterComplex({
         ? 80
         : 0;
   const maxShotY = Math.max(minShotY, maxShotBottom - screenshotHeight);
-  const requestedShotY = layout.screenshotY + shotYOffset;
+  const centeredShotY =
+    minShotY + Math.max(0, Math.round((availableShotHeight - screenshotHeight) / 2));
+  const requestedShotY = centeredShotY + shotYOffset;
   const shotY = Math.max(minShotY, Math.min(maxShotY, requestedShotY));
 
   const metadataY = Math.min(
@@ -483,7 +485,9 @@ async function createPostCopyOverlays({
   renderOptions: RenderOptions;
 }) {
   const postCopy = renderOptions.postCopy ?? null;
-  const metadataLine = postCopy?.renderedBookTitleLine?.trim() ?? "";
+  const metadataLine = normaliseRenderedMetadataLine(
+    postCopy?.renderedBookTitleLine?.trim() ?? "",
+  );
   const keywords = (
     postCopy?.keywordOrder?.length ? postCopy.keywordOrder : postCopy?.keywords
   )?.filter((keyword): keyword is string => Boolean(keyword?.trim()));
@@ -516,6 +520,20 @@ async function createPostCopyOverlays({
     metadataOverlay,
     keywordsOverlay,
   };
+}
+
+function normaliseRenderedMetadataLine(value: string) {
+  return value
+    .replace(/\bBuy\b/gi, "Read")
+    .replace(/\bGet\b/gi, "Read")
+    .replace(/\bKDP\b/gi, "K U")
+    .replace(/\bKindle\s+Unlimited\b/gi, "K U")
+    .replace(/\bAmazon\b/gi, "K U")
+    .replace(/\bon\s+K\s*U\b/gi, "in K U")
+    .replace(/\bfrom\s+K\s*U\b/gi, "in K U")
+    .replace(/\bat\s+K\s*U\b/gi, "in K U")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function clampNumber(
