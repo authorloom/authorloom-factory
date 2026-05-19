@@ -60,7 +60,7 @@ function renderHookText(text) {
       {
         key: `${index}-${run.isEmoji ? "emoji" : "text"}`,
         style: {
-          display: "inline",
+          display: "contents",
           fontFamily: run.isEmoji ? "sans-serif" : "inherit",
           textShadow: run.isEmoji ? "none" : hookTextShadow,
         },
