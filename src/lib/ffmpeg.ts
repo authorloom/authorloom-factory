@@ -139,6 +139,25 @@ async function getMediaDimensions(filepath: string): Promise<MediaDimensions> {
   };
 }
 
+async function getMediaDurationSeconds(filepath: string): Promise<number | null> {
+  const result = await runCommand(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      filepath,
+    ],
+    { all: true },
+  );
+  const duration = Number.parseFloat(result.stdout.trim());
+
+  return Number.isFinite(duration) && duration > 0 ? duration : null;
+}
+
 async function fileExists(filepath: string | null) {
   if (!filepath) {
     return false;
@@ -537,6 +556,8 @@ function buildThumbnailIntroFilterComplex({
 
 function hookFontCandidates() {
   return [
+    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Bold.ttf"),
+    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Semibold.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "ProximaNova-Semibold.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "ProximaNova-SemiBold.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Semibold.ttf"),
@@ -621,10 +642,20 @@ export async function renderJob(jobId: string) {
   }
 
   const renderOptions = parseRenderOptions(job.render_options_json);
-  const renderDuration =
+  const requestedRenderDuration =
     renderOptions.durationSeconds ??
     job.render_duration_seconds ??
     getRandomRenderDurationSeconds();
+  const audioDuration = job.audio_filepath
+    ? await getMediaDurationSeconds(job.audio_filepath).catch(() => null)
+    : null;
+  const audioStartOffset = Math.max(0, job.audio_start_offset_seconds ?? 0);
+  const availableAudioDuration =
+    audioDuration === null ? null : Math.max(0.5, audioDuration - audioStartOffset);
+  const renderDuration =
+    availableAudioDuration === null
+      ? requestedRenderDuration
+      : Math.min(requestedRenderDuration, availableAudioDuration);
   const hasThumbnailIntro = await fileExists(job.thumbnail_filepath);
   const renderDurationSeconds = String(renderDuration);
   const thumbnailIntroDuration = String(thumbnailIntroDurationSeconds);
