@@ -26,49 +26,7 @@ async function getHookFont(fontCandidates) {
 }
 
 const hookTextShadow =
-  "0 0 3px rgba(0,0,0,0.95), 0 0 8px rgba(0,0,0,0.85), 0 2px 4px rgba(0,0,0,0.9)";
-const emojiPattern = /\p{Extended_Pictographic}/u;
-
-function splitEmojiRuns(text) {
-  const segmenter =
-    typeof Intl.Segmenter === "function"
-      ? new Intl.Segmenter("en", { granularity: "grapheme" })
-      : null;
-  const segments = segmenter
-    ? Array.from(segmenter.segment(text), (segment) => segment.segment)
-    : Array.from(text);
-  const runs = [];
-
-  for (const segment of segments) {
-    const isEmoji = emojiPattern.test(segment);
-    const previous = runs.at(-1);
-
-    if (previous && previous.isEmoji === isEmoji) {
-      previous.text += segment;
-    } else {
-      runs.push({ text: segment, isEmoji });
-    }
-  }
-
-  return runs;
-}
-
-function renderHookText(text) {
-  return splitEmojiRuns(text).map((run, index) =>
-    React.createElement(
-      "span",
-      {
-        key: `${index}-${run.isEmoji ? "emoji" : "text"}`,
-        style: {
-          display: "contents",
-          fontFamily: run.isEmoji ? "sans-serif" : "inherit",
-          textShadow: run.isEmoji ? "none" : hookTextShadow,
-        },
-      },
-      run.text,
-    ),
-  );
-}
+  "0 1px 2px rgba(0,0,0,0.95), 0 2px 5px rgba(0,0,0,0.8)";
 
 const configPath = process.argv[2];
 
@@ -97,22 +55,12 @@ const imageStream = await unstable_createNodejsStream(
         lineHeight: 1.05,
         padding: "0 12px",
         textAlign: "center",
+        textShadow: hookTextShadow,
         width: Number(config.width),
         whiteSpace: "pre-line",
       },
     },
-    React.createElement(
-      "div",
-      {
-        style: {
-          display: "block",
-          textAlign: "center",
-          whiteSpace: "pre-line",
-          width: "100%",
-        },
-      },
-      renderHookText(config.text),
-    ),
+    config.text,
   ),
   {
     width: Number(config.width),
