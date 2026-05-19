@@ -3,6 +3,7 @@ import { anyApi } from "convex/server";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
+import { google } from "googleapis";
 
 import {
   createAuthor,
@@ -49,6 +50,23 @@ const authorloomAppUrl =
   process.env.AUTHORLOOM_APP_URL?.trim() ||
   process.env.NEXT_PUBLIC_APP_URL?.trim() ||
   "https://app.authorloom.com";
+const scalerSecret = process.env.AUTHORLOOM_SCALER_SECRET?.trim();
+const scalerProjectId =
+  process.env.AUTHORLOOM_SCALER_PROJECT_ID?.trim() ||
+  process.env.GOOGLE_PROJECT_ID?.trim() ||
+  process.env.GOOGLE_CLOUD_PROJECT?.trim() ||
+  process.env.GCLOUD_PROJECT?.trim();
+const scalerRegion =
+  process.env.AUTHORLOOM_SCALER_REGION?.trim() ||
+  process.env.GOOGLE_CLOUD_RUN_REGION?.trim() ||
+  process.env.CLOUD_RUN_REGION?.trim();
+const scalerService =
+  process.env.AUTHORLOOM_SCALER_SERVICE?.trim() ||
+  process.env.K_SERVICE?.trim();
+const scalerMaxInstances = Math.max(
+  1,
+  Number(process.env.AUTHORLOOM_SCALER_MAX_INSTANCES ?? 30),
+);
 
 if (!convexUrl) {
   throw new Error(
@@ -178,6 +196,20 @@ type RenderCampaignInput = {
   videos?: RenderInstruction[];
 };
 
+type QueueStatsResult = {
+  success: boolean;
+  message?: string;
+  active?: number;
+  counts?: {
+    queued: number;
+    claimed: number;
+    running: number;
+    waiting: number;
+    failed: number;
+  };
+  checkedAt?: number;
+};
+
 function renderInstructions(input: unknown): RenderInstruction[] {
   if (!input || typeof input !== "object") {
     return [];
@@ -189,6 +221,140 @@ function renderInstructions(input: unknown): RenderInstruction[] {
 
 function renderCampaignInput(input: unknown): RenderCampaignInput {
   return input && typeof input === "object" ? (input as RenderCampaignInput) : {};
+}
+
+function targetInstancesForQueueDepth(activeJobs: number) {
+  if (activeJobs <= 0) return 1;
+  if (activeJobs <= 20) return 2;
+  if (activeJobs <= 80) return 4;
+  if (activeJobs <= 200) return 6;
+  if (activeJobs <= 400) return 8;
+  if (activeJobs <= 600) return 10;
+  if (activeJobs <= 800) return 12;
+  if (activeJobs <= 1_000) return 14;
+  if (activeJobs <= 2_000) return 17;
+  if (activeJobs <= 5_000) return 20;
+  return 30;
+}
+
+async function cloudRunAccessToken() {
+  const auth = new google.auth.GoogleAuth({
+    scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+  });
+  const client = await auth.getClient();
+  const token = await client.getAccessToken();
+  const accessToken = typeof token === "string" ? token : token?.token;
+
+  if (!accessToken) {
+    throw new Error("Could not obtain Google Cloud access token for scaler.");
+  }
+
+  return accessToken;
+}
+
+async function getCloudRunService(accessToken: string) {
+  if (!scalerProjectId || !scalerRegion || !scalerService) {
+    throw new Error(
+      "Scaler requires AUTHORLOOM_SCALER_PROJECT_ID/GOOGLE_PROJECT_ID, AUTHORLOOM_SCALER_REGION, and AUTHORLOOM_SCALER_SERVICE/K_SERVICE.",
+    );
+  }
+
+  const serviceName = `projects/${scalerProjectId}/locations/${scalerRegion}/services/${scalerService}`;
+  const response = await fetch(`https://run.googleapis.com/v2/${serviceName}`, {
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      accept: "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Could not read Cloud Run service ${serviceName}: ${response.status} ${await response.text()}`,
+    );
+  }
+
+  return {
+    serviceName,
+    service: (await response.json()) as {
+      scaling?: { minInstanceCount?: number | string };
+      template?: { scaling?: { maxInstanceCount?: number | string } };
+    },
+  };
+}
+
+async function patchCloudRunScaling(input: {
+  serviceName: string;
+  accessToken: string;
+  minInstances: number;
+  maxInstances: number;
+}) {
+  const updateMask = [
+    "scaling.minInstanceCount",
+    "template.scaling.maxInstanceCount",
+  ].join(",");
+  const response = await fetch(
+    `https://run.googleapis.com/v2/${input.serviceName}?updateMask=${encodeURIComponent(updateMask)}`,
+    {
+      method: "PATCH",
+      headers: {
+        authorization: `Bearer ${input.accessToken}`,
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify({
+        scaling: { minInstanceCount: input.minInstances },
+        template: { scaling: { maxInstanceCount: input.maxInstances } },
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Could not update Cloud Run scaling for ${input.serviceName}: ${response.status} ${await response.text()}`,
+    );
+  }
+}
+
+async function runScaleCheck() {
+  const stats = (await client.query(api.productionJobs.workerQueueStats, {
+    workerSecret: requiredWorkerSecret,
+    types: ["render_campaign_videos"],
+  })) as QueueStatsResult;
+
+  if (!stats.success) {
+    throw new Error(stats.message ?? "Could not read Authorloom queue stats.");
+  }
+
+  const activeJobs = stats.active ?? 0;
+  const targetMinInstances = Math.min(
+    scalerMaxInstances,
+    targetInstancesForQueueDepth(activeJobs),
+  );
+  const targetMaxInstances = Math.max(scalerMaxInstances, targetMinInstances);
+  const accessToken = await cloudRunAccessToken();
+  const { serviceName, service } = await getCloudRunService(accessToken);
+  const currentMin = Number(service.scaling?.minInstanceCount ?? 0);
+  const currentMax = Number(service.template?.scaling?.maxInstanceCount ?? 0);
+
+  if (currentMin !== targetMinInstances || currentMax !== targetMaxInstances) {
+    await patchCloudRunScaling({
+      serviceName,
+      accessToken,
+      minInstances: targetMinInstances,
+      maxInstances: targetMaxInstances,
+    });
+  }
+
+  return {
+    ok: true,
+    activeJobs,
+    counts: stats.counts,
+    targetMinInstances,
+    targetMaxInstances,
+    currentMin,
+    currentMax,
+    changed: currentMin !== targetMinInstances || currentMax !== targetMaxInstances,
+  };
 }
 
 function validateRenderInstruction(input: {
@@ -1253,7 +1419,7 @@ function startHealthServer() {
     return;
   }
 
-  const server = http.createServer((request, response) => {
+  const server = http.createServer(async (request, response) => {
     if (request.url === "/healthz") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(
@@ -1264,6 +1430,42 @@ function startHealthServer() {
           lastClaimedJobId,
         }),
       );
+      return;
+    }
+
+    const requestUrl = new URL(request.url ?? "/", "http://localhost");
+
+    if (requestUrl.pathname === "/scale-check") {
+      const providedSecret =
+        request.headers["x-authorloom-scaler-secret"]?.toString().trim() ||
+        requestUrl.searchParams.get("secret")?.trim();
+
+      if (!scalerSecret || providedSecret !== scalerSecret) {
+        response.writeHead(401, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: false, message: "Unauthorized." }));
+        return;
+      }
+
+      try {
+        const result = await runScaleCheck();
+
+        console.log(
+          `Scale check: ${result.activeJobs} active jobs, target min ${result.targetMinInstances}, max ${result.targetMaxInstances}, changed=${result.changed}.`,
+        );
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(result));
+      } catch (error) {
+        console.error("Scale check failed.");
+        console.error(error instanceof Error ? error.message : error);
+        response.writeHead(500, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            ok: false,
+            message: error instanceof Error ? error.message : "Scale check failed.",
+          }),
+        );
+      }
+
       return;
     }
 
