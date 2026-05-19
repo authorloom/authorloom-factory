@@ -447,6 +447,23 @@ function validateRenderInstruction(input: {
   if (!options.cropVariant?.trim()) {
     errors.push(`${prefix}.renderOptions.cropVariant is required.`);
   }
+  if (options.layoutTemplate === "booktok_full_background_multi_hook") {
+    const multiHookTexts = Array.isArray(options.multiHookTexts)
+      ? options.multiHookTexts.filter((text) => Boolean(text?.trim()))
+      : [];
+
+    if (multiHookTexts.length === 0) {
+      errors.push(`${prefix}.renderOptions.multiHookTexts is required for full-background multi-hook layouts.`);
+    }
+    if (
+      typeof options.durationSeconds === "number" &&
+      options.durationSeconds < multiHookTexts.length * 3
+    ) {
+      errors.push(
+        `${prefix}.renderOptions.durationSeconds must be at least 3 seconds per hook for full-background multi-hook layouts.`,
+      );
+    }
+  }
 
   return errors;
 }

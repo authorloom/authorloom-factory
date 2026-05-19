@@ -37,6 +37,11 @@ type OverlayInput = {
   height: number;
 };
 
+type HookOverlayInput = OverlayInput & {
+  startSeconds?: number;
+  endSeconds?: number;
+};
+
 type MediaDimensions = {
   width: number;
   height: number;
@@ -272,6 +277,7 @@ function buildImageTextFilterComplex({
   layout,
   options,
   screenshotDimensions,
+  hookOverlays = [],
   metadataOverlay,
   keywordsOverlay,
   outputLabel = "vout",
@@ -279,6 +285,7 @@ function buildImageTextFilterComplex({
   layout: Layout;
   options?: RenderOptions;
   screenshotDimensions: MediaDimensions;
+  hookOverlays?: HookOverlayInput[];
   metadataOverlay?: OverlayInput | null;
   keywordsOverlay?: OverlayInput | null;
   outputLabel?: string;
@@ -399,19 +406,42 @@ function buildImageTextFilterComplex({
 
   const baseFilters = [
     `[0:v]setpts=${(1 / playbackSpeed).toFixed(5)}*PTS,scale=${scaledCanvasWidth}:${scaledCanvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY}[bg]`,
-    "[2:v]format=rgba[hook]",
   ];
 
   if (isFullBackgroundLayout) {
+    const timedHookFilters: string[] = [];
+    let timedHookInputLabel = "bg";
+
+    hookOverlays.forEach((overlay, index) => {
+      const hookLabel = `hook${index}`;
+      const outputHookLabel = `withhook${index}`;
+      const enable =
+        typeof overlay.startSeconds === "number" &&
+        typeof overlay.endSeconds === "number"
+          ? `:enable='between(t,${overlay.startSeconds},${overlay.endSeconds})'`
+          : "";
+
+      timedHookFilters.push(
+        `[${overlay.inputIndex}:v]format=rgba[${hookLabel}]`,
+        `[${timedHookInputLabel}][${hookLabel}]overlay=x=(W-w)/2:y=${Math.round(hookY)}${enable}[${outputHookLabel}]`,
+      );
+      timedHookInputLabel = outputHookLabel;
+    });
+
+    if (timedHookInputLabel !== "withhook") {
+      timedHookFilters.push(`[${timedHookInputLabel}]null[withhook]`);
+    }
+
     return [
       ...baseFilters,
-      `[bg][hook]overlay=x=(W-w)/2:y=${Math.round(hookY)}[withhook]`,
+      ...timedHookFilters,
       ...textFilters,
     ].join(";");
   }
 
   return [
     ...baseFilters,
+    "[2:v]format=rgba[hook]",
     `[1:v]scale=${screenshotWidth}:-2:force_original_aspect_ratio=decrease,setsar=1[shot]`,
     `[bg][shot]overlay=x=${shotX}:y=${Math.round(shotY)}[withshot]`,
     `[withshot][hook]overlay=x=(W-w)/2:y=${Math.round(hookY)}[withhook]`,
@@ -611,10 +641,11 @@ async function createHookOverlayImage(
   campaignId: string,
   jobId: string,
   hookText: string,
+  suffix = "hook",
 ): Promise<HookOverlayResult> {
   const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
-  const overlayFilepath = path.join(tempDirectory, `${jobId}-hook.png`);
-  const overlayConfigFilepath = path.join(tempDirectory, `${jobId}-hook.json`);
+  const overlayFilepath = path.join(tempDirectory, `${jobId}-${suffix}.png`);
+  const overlayConfigFilepath = path.join(tempDirectory, `${jobId}-${suffix}.json`);
 
   await fs.mkdir(tempDirectory, { recursive: true });
 
@@ -680,6 +711,12 @@ export async function renderJob(jobId: string) {
   }
 
   const renderOptions = parseRenderOptions(job.render_options_json);
+  const multiHookTexts = Array.isArray(renderOptions.multiHookTexts)
+    ? renderOptions.multiHookTexts.filter((text) => Boolean(text?.trim()))
+    : [];
+  const isFullBackgroundMultiHook =
+    renderOptions.layoutTemplate === "booktok_full_background_multi_hook" &&
+    multiHookTexts.length > 0;
   const requestedRenderDuration =
     renderOptions.durationSeconds ??
     job.render_duration_seconds ??
@@ -694,6 +731,17 @@ export async function renderJob(jobId: string) {
     availableAudioDuration === null
       ? requestedRenderDuration
       : Math.min(requestedRenderDuration, availableAudioDuration);
+
+  if (
+    isFullBackgroundMultiHook &&
+    availableAudioDuration !== null &&
+    availableAudioDuration < requestedRenderDuration
+  ) {
+    throw new Error(
+      `Audio segment is too short for timed multi-hook render. Required ${requestedRenderDuration}s, available ${availableAudioDuration.toFixed(2)}s after start offset.`,
+    );
+  }
+
   const hasThumbnailIntro = await fileExists(job.thumbnail_filepath);
   const renderDurationSeconds = String(renderDuration);
   const thumbnailIntroDuration = String(thumbnailIntroDurationSeconds);
@@ -705,19 +753,16 @@ export async function renderJob(jobId: string) {
   await fs.mkdir(outputDirectory, { recursive: true });
   markRenderJobRunning(job.id);
 
-  const multiHookTexts = Array.isArray(renderOptions.multiHookTexts)
-    ? renderOptions.multiHookTexts.filter((text) => Boolean(text?.trim()))
+  const hookOverlay = isFullBackgroundMultiHook
+    ? null
+    : await createHookOverlayImage(job.campaign_id, job.id, job.hook_text);
+  const timedHookOverlays = isFullBackgroundMultiHook
+    ? await Promise.all(
+        multiHookTexts.map((hookText, index) =>
+          createHookOverlayImage(job.campaign_id, job.id, hookText, `hook-${index}`),
+        ),
+      )
     : [];
-  const hookOverlayText =
-    renderOptions.layoutTemplate === "booktok_full_background_multi_hook" &&
-    multiHookTexts.length > 0
-      ? multiHookTexts.slice(0, 3).join("\n\n")
-      : job.hook_text;
-  const hookOverlay = await createHookOverlayImage(
-    job.campaign_id,
-    job.id,
-    hookOverlayText,
-  );
   const postCopyOverlays = await createPostCopyOverlays({
     campaignId: job.campaign_id,
     jobId: job.id,
@@ -734,12 +779,22 @@ export async function renderJob(jobId: string) {
     (postCopyOverlays.metadataOverlay?.height ?? 0) +
     (postCopyOverlays.keywordsOverlay?.height ?? 0) +
     96;
+  const timedHookHeight = Math.max(
+    0,
+    ...timedHookOverlays.map((overlay) => overlay.height),
+  );
   const layout = hookOverlay
     ? calculateLayout({
         screenshotDimensions,
         hookHeight: hookOverlay.height,
         footerHeight,
       })
+    : timedHookHeight > 0
+      ? calculateLayout({
+          screenshotDimensions,
+          hookHeight: timedHookHeight,
+          footerHeight,
+        })
     : null;
 
   const args = [
@@ -767,6 +822,21 @@ export async function renderJob(jobId: string) {
   if (hookOverlay) {
     args.push("-i", hookOverlay.filepath);
     nextInputIndex += 1;
+  }
+
+  const timedHookOverlayInputs: HookOverlayInput[] = [];
+
+  if (timedHookOverlays.length > 0) {
+    timedHookOverlays.forEach((overlay, index) => {
+      args.push("-i", overlay.filepath);
+      timedHookOverlayInputs.push({
+        inputIndex: nextInputIndex,
+        height: overlay.height,
+        startSeconds: index * 3,
+        endSeconds: (index + 1) * 3,
+      });
+      nextInputIndex += 1;
+    });
   }
 
   const metadataOverlayInputIndex = postCopyOverlays.metadataOverlay
@@ -816,9 +886,10 @@ export async function renderJob(jobId: string) {
         screenshotY: 700,
         screenshotWidth: maxScreenshotWidth,
         footerHeight,
-    },
+      },
     options: renderOptions,
     screenshotDimensions,
+    hookOverlays: timedHookOverlayInputs,
     metadataOverlay:
       postCopyOverlays.metadataOverlay && metadataOverlayInputIndex !== null
         ? {
@@ -889,6 +960,7 @@ export async function renderJob(jobId: string) {
         ? thumbnailIntroDuration
         : null,
       hookOverlay,
+      timedHookOverlays,
       layout,
       renderOptions,
       postCopyOverlays,
@@ -921,6 +993,9 @@ export async function renderJob(jobId: string) {
     if (hookOverlay) {
       await fs.rm(hookOverlay.filepath, { force: true });
     }
+    await Promise.all(
+      timedHookOverlays.map((overlay) => fs.rm(overlay.filepath, { force: true })),
+    );
     await Promise.all(
       [
         postCopyOverlays.metadataOverlay?.filepath,
