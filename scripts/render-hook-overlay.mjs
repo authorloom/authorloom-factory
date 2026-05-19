@@ -26,7 +26,7 @@ async function getHookFont(fontCandidates) {
 }
 
 const hookTextShadow =
-  "2px 0 0 rgba(0,0,0,0.95), -2px 0 0 rgba(0,0,0,0.95), 0 2px 0 rgba(0,0,0,0.95), 0 -2px 0 rgba(0,0,0,0.95), 1.4px 1.4px 0 rgba(0,0,0,0.9), -1.4px 1.4px 0 rgba(0,0,0,0.9), 1.4px -1.4px 0 rgba(0,0,0,0.9), -1.4px -1.4px 0 rgba(0,0,0,0.9), 0 3px 5px rgba(0,0,0,0.7)";
+  "2.5px 0 0 rgba(0,0,0,0.96), -2.5px 0 0 rgba(0,0,0,0.96), 0 2.5px 0 rgba(0,0,0,0.96), 0 -2.5px 0 rgba(0,0,0,0.96), 1.8px 1.8px 0 rgba(0,0,0,0.92), -1.8px 1.8px 0 rgba(0,0,0,0.92), 1.8px -1.8px 0 rgba(0,0,0,0.92), -1.8px -1.8px 0 rgba(0,0,0,0.92), 0 0 9px rgba(0,0,0,0.72), 0 0 18px rgba(0,0,0,0.44)";
 
 const configPath = process.argv[2];
 
@@ -48,7 +48,7 @@ const imageStream = await unstable_createNodejsStream(
         display: "flex",
         fontFamily,
         fontSize: Number(config.fontSize),
-        fontWeight: 700,
+        fontWeight: 600,
         height: Number(config.height),
         justifyContent: "center",
         letterSpacing: "0",
@@ -71,7 +71,7 @@ const imageStream = await unstable_createNodejsStream(
           {
             name: hookFont.name,
             data: hookFont.data,
-            weight: 700,
+            weight: 600,
             style: "normal",
           },
         ]

@@ -25,6 +25,7 @@ const safeContentBottom = canvasHeight - safeBottom;
 const maxScreenshotWidth = 760;
 const minScreenshotWidth = 440;
 const hookScreenshotGap = 24;
+const defaultHookYOffset = 86;
 
 type HookOverlayResult = {
   filepath: string;
@@ -35,6 +36,10 @@ type HookOverlayResult = {
 type OverlayInput = {
   inputIndex: number;
   height: number;
+};
+
+type CoverOverlayInput = OverlayInput & {
+  width: number;
 };
 
 type HookOverlayInput = OverlayInput & {
@@ -247,7 +252,7 @@ function calculateLayout({
   hookHeight: number;
   footerHeight?: number;
 }): Layout {
-  const hookY = safeTop + 20;
+  const hookY = safeTop + 20 + defaultHookYOffset;
   const screenshotY = hookY + hookHeight + hookScreenshotGap;
   const maxScreenshotBottom = safeContentBottom - footerHeight - 32;
   const availableScreenshotHeight = Math.max(
@@ -278,6 +283,7 @@ function buildImageTextFilterComplex({
   options,
   screenshotDimensions,
   hookOverlays = [],
+  coverOverlay,
   metadataOverlay,
   keywordsOverlay,
   outputLabel = "vout",
@@ -286,6 +292,7 @@ function buildImageTextFilterComplex({
   options?: RenderOptions;
   screenshotDimensions: MediaDimensions;
   hookOverlays?: HookOverlayInput[];
+  coverOverlay?: CoverOverlayInput | null;
   metadataOverlay?: OverlayInput | null;
   keywordsOverlay?: OverlayInput | null;
   outputLabel?: string;
@@ -307,6 +314,9 @@ function buildImageTextFilterComplex({
   const hookPlacement = effectiveOptions.hookPlacement ?? "auto";
   const layoutTemplate = effectiveOptions.layoutTemplate ?? "booktok_text_screenshot";
   const isCompactLayout = layoutTemplate === "booktok_compact_screenshot";
+  const isCoverCenterLayout = layoutTemplate === "left_cover_center_screenshot";
+  const isCoverOffsetLayout = layoutTemplate === "left_cover_offset_screenshot";
+  const isCoverLayout = isCoverCenterLayout || isCoverOffsetLayout;
   const isFullBackgroundLayout = layoutTemplate === "booktok_full_background_multi_hook";
   const cropVariant = effectiveOptions.cropVariant ?? "center";
   const scaledCanvasWidth = Math.round(canvasWidth * zoomLevel);
@@ -330,7 +340,7 @@ function buildImageTextFilterComplex({
       : isCompactLayout
         ? Math.round(canvasHeight * 0.28)
         : hookPlacement === "top"
-      ? safeTop
+      ? safeTop + defaultHookYOffset
       : hookPlacement === "upper-middle"
         ? safeTop + 120
         : hookPlacement === "middle"
@@ -338,7 +348,22 @@ function buildImageTextFilterComplex({
           : layout.hookY;
   const copyBlockHeight =
     (metadataOverlay?.height ?? 0) + (keywordsOverlay?.height ?? 0);
-  const minShotY = Math.round(hookY + layout.hookHeight + hookScreenshotGap);
+  const coverWidth = coverOverlay
+    ? isCoverOffsetLayout
+      ? 235
+      : 220
+    : 0;
+  const coverHeight = coverOverlay
+    ? Math.round(coverOverlay.height * (coverWidth / coverOverlay.width))
+    : 0;
+  const coverY = coverOverlay
+    ? Math.max(Math.round(hookY + layout.hookHeight + 28), isCoverOffsetLayout ? 560 : 520)
+    : 0;
+  const minShotY = Math.round(
+    coverOverlay
+      ? coverY + coverHeight + 24
+      : hookY + layout.hookHeight + hookScreenshotGap,
+  );
   const maxShotBottom = Math.max(
     minShotY + 300,
     safeContentBottom - copyBlockHeight - (isCompactLayout ? 18 : 40),
@@ -350,7 +375,7 @@ function buildImageTextFilterComplex({
   const screenshotWidth = Math.max(
     320,
     Math.min(
-      maxScreenshotWidth,
+      isCoverLayout ? 560 : maxScreenshotWidth,
       widthThatFitsAvailableHeight,
       Math.round(layout.screenshotWidth * screenshotScale),
     ),
@@ -367,22 +392,29 @@ function buildImageTextFilterComplex({
   const maxShotY = Math.max(minShotY, maxShotBottom - screenshotHeight);
   const centeredShotY =
     minShotY + Math.max(0, Math.round((availableShotHeight - screenshotHeight) / 2));
-  const requestedShotY = (isCompactLayout ? maxShotY : centeredShotY) + shotYOffset;
+  const requestedShotY =
+    (isCompactLayout || isCoverLayout ? maxShotY : centeredShotY) + shotYOffset;
   const shotY = Math.max(minShotY, Math.min(maxShotY, requestedShotY));
 
-  const metadataY = Math.min(
-    canvasHeight -
-      safeTop -
-      (metadataOverlay?.height ?? 0) -
-      (keywordsOverlay?.height ?? 0),
-    Math.round(shotY + screenshotHeight + 34),
+  const copySafeBottom = canvasHeight - Math.round(safeBottom * 0.52);
+  const copyBlockBottomPadding = 36;
+  const preferredMetadataY = Math.round(shotY + screenshotHeight + 54);
+  const lowestMetadataY =
+    copySafeBottom -
+    copyBlockBottomPadding -
+    (metadataOverlay?.height ?? 0) -
+    (keywordsOverlay?.height ?? 0) -
+    ((metadataOverlay && keywordsOverlay) ? 8 : 0);
+  const metadataY = Math.max(
+    preferredMetadataY,
+    Math.min(lowestMetadataY, preferredMetadataY + 90),
   );
   const keywordsY = Math.min(
-    canvasHeight - safeTop - (keywordsOverlay?.height ?? 0),
+    copySafeBottom - copyBlockBottomPadding - (keywordsOverlay?.height ?? 0),
     metadataY + (metadataOverlay?.height ?? 0) + 8,
   );
   const textFilters: string[] = [];
-  let currentLabel = "withhook";
+  let currentLabel = coverOverlay ? "withcover" : "withhook";
 
   if (metadataOverlay) {
     textFilters.push(
@@ -445,6 +477,12 @@ function buildImageTextFilterComplex({
     `[1:v]scale=${screenshotWidth}:-2:force_original_aspect_ratio=decrease,setsar=1[shot]`,
     `[bg][shot]overlay=x=${shotX}:y=${Math.round(shotY)}[withshot]`,
     `[withshot][hook]overlay=x=(W-w)/2:y=${Math.round(hookY)}[withhook]`,
+    ...(coverOverlay
+      ? [
+          `[${coverOverlay.inputIndex}:v]scale=${coverWidth}:-2:force_original_aspect_ratio=decrease,setsar=1[cover]`,
+          `[withhook][cover]overlay=x=(W-w)/2:y=${coverY}[withcover]`,
+        ]
+      : []),
     ...textFilters,
   ].join(";");
 }
@@ -711,13 +749,17 @@ export async function renderJob(jobId: string) {
   }
 
   const renderOptions = parseRenderOptions(job.render_options_json);
+  const layoutTemplate = renderOptions.layoutTemplate ?? "booktok_text_screenshot";
+  const isCoverLayout =
+    layoutTemplate === "left_cover_center_screenshot" ||
+    layoutTemplate === "left_cover_offset_screenshot";
   const multiHookTexts = Array.isArray(renderOptions.multiHookTexts)
     ? renderOptions.multiHookTexts.filter((text) => Boolean(text?.trim()))
     : [];
   const isFullBackgroundMultiHook =
     renderOptions.layoutTemplate === "booktok_full_background_multi_hook" &&
     multiHookTexts.length > 0;
-  const requestedRenderDuration =
+  const rawRequestedRenderDuration =
     renderOptions.durationSeconds ??
     job.render_duration_seconds ??
     getRandomRenderDurationSeconds();
@@ -727,6 +769,14 @@ export async function renderJob(jobId: string) {
   const audioStartOffset = Math.max(0, job.audio_start_offset_seconds ?? 0);
   const availableAudioDuration =
     audioDuration === null ? null : Math.max(0.5, audioDuration - audioStartOffset);
+  const requestedRenderDuration = isFullBackgroundMultiHook
+    ? rawRequestedRenderDuration
+    : clampNumber(
+        rawRequestedRenderDuration,
+        minRenderDurationSeconds,
+        maxRenderDurationSeconds,
+        getRandomRenderDurationSeconds(),
+      );
   const renderDuration =
     availableAudioDuration === null
       ? requestedRenderDuration
@@ -742,7 +792,9 @@ export async function renderJob(jobId: string) {
     );
   }
 
-  const hasThumbnailIntro = await fileExists(job.thumbnail_filepath);
+  const hasThumbnailFile = await fileExists(job.thumbnail_filepath);
+  const hasCoverOverlay = isCoverLayout && hasThumbnailFile;
+  const hasThumbnailIntro = hasThumbnailFile && !hasCoverOverlay;
   const renderDurationSeconds = String(renderDuration);
   const thumbnailIntroDuration = String(thumbnailIntroDurationSeconds);
 
@@ -858,8 +910,9 @@ export async function renderJob(jobId: string) {
   }
 
   const thumbnailInputIndex = hasThumbnailIntro ? nextInputIndex : null;
+  const coverInputIndex = hasCoverOverlay ? nextInputIndex : null;
 
-  if (hasThumbnailIntro && job.thumbnail_filepath) {
+  if ((hasThumbnailIntro || hasCoverOverlay) && job.thumbnail_filepath) {
     args.push(
       "-loop",
       "1",
@@ -890,6 +943,13 @@ export async function renderJob(jobId: string) {
     options: renderOptions,
     screenshotDimensions,
     hookOverlays: timedHookOverlayInputs,
+    coverOverlay:
+      hasCoverOverlay && coverInputIndex !== null && job.thumbnail_filepath
+        ? {
+            inputIndex: coverInputIndex,
+            ...(await getMediaDimensions(job.thumbnail_filepath)),
+          }
+        : null,
     metadataOverlay:
       postCopyOverlays.metadataOverlay && metadataOverlayInputIndex !== null
         ? {

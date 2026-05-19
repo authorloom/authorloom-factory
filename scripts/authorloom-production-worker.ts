@@ -518,6 +518,35 @@ function getPreviewBucketName() {
   return env.AUTHORLOOM_PREVIEW_BUCKET ?? env.GOOGLE_CLOUD_STORAGE_BUCKET ?? null;
 }
 
+function getPreviewObjectPrefix() {
+  return (
+    env.AUTHORLOOM_PREVIEW_OBJECT_PREFIX ??
+    env.GOOGLE_CLOUD_STORAGE_PREFIX ??
+    "authorloom-previews"
+  )
+    .trim()
+    .replace(/^\/+|\/+$/g, "");
+}
+
+function previewObjectName(objectPath: string) {
+  return [getPreviewObjectPrefix(), objectPath.replace(/^\/+/g, "")]
+    .filter(Boolean)
+    .join("/");
+}
+
+function previewPublicUrl(objectName: string) {
+  const encodedObjectName = objectName
+    .split("/")
+    .map(encodeURIComponent)
+    .join("/");
+
+  return `${authorloomAppUrl.replace(/\/+$/g, "")}/api/previews/${encodedObjectName}`;
+}
+
+function authHeadersToRecord(headers: Headers | Record<string, string>) {
+  return Object.fromEntries(new Headers(headers as HeadersInit).entries());
+}
+
 function getPreviewObjectNameFromUrl(value: string | null | undefined) {
   if (!value) {
     return null;
@@ -568,6 +597,87 @@ async function downloadPreviewObjectFromStorage(
   }
 
   await fs.writeFile(filepath, Buffer.from(await response.arrayBuffer()));
+}
+
+async function uploadRenderedPreviewToStorage(input: {
+  filepath: string;
+  campaignId?: string | null;
+  videoOutputId: string;
+  outputFilename?: string | null;
+}) {
+  const bucketName = getPreviewBucketName();
+
+  if (!bucketName) {
+    console.warn(
+      "AUTHORLOOM_PREVIEW_BUCKET or GOOGLE_CLOUD_STORAGE_BUCKET is not configured; skipping render preview staging.",
+    );
+    return null;
+  }
+
+  const objectName = previewObjectName(
+    [
+      "rendered-videos",
+      input.campaignId ?? "uncategorized",
+      input.videoOutputId,
+      safeFilename(input.outputFilename, `${input.videoOutputId}.mp4`),
+    ].join("/"),
+  );
+  const mediaUrl = `https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(
+    bucketName,
+  )}/o?uploadType=media&name=${encodeURIComponent(objectName)}`;
+  const metadataUrl = `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(
+    bucketName,
+  )}/o/${encodeURIComponent(objectName)}`;
+  const auth = getGoogleServiceAccountAuth({ impersonateWorkspace: false });
+  const mediaHeaders = await auth.getRequestHeaders(mediaUrl);
+  const buffer = await fs.readFile(input.filepath);
+  const mediaResponse = await fetch(mediaUrl, {
+    method: "POST",
+    headers: {
+      ...authHeadersToRecord(mediaHeaders),
+      "content-type": "video/mp4",
+      "content-length": String(buffer.length),
+    },
+    body: new Uint8Array(buffer),
+  });
+
+  if (!mediaResponse.ok && mediaResponse.status !== 409) {
+    const body = await mediaResponse.text().catch(() => "");
+    throw new Error(
+      `Could not upload rendered preview ${objectName} to Cloud Storage: ${mediaResponse.status} ${body.slice(
+        0,
+        300,
+      )}`,
+    );
+  }
+
+  const metadataHeaders = await auth.getRequestHeaders(metadataUrl);
+  const metadataResponse = await fetch(metadataUrl, {
+    method: "PATCH",
+    headers: {
+      ...authHeadersToRecord(metadataHeaders),
+      "content-type": "application/json; charset=UTF-8",
+    },
+    body: JSON.stringify({
+      contentType: "video/mp4",
+      cacheControl: "private, max-age=3600",
+    }),
+  });
+
+  if (!metadataResponse.ok) {
+    const body = await metadataResponse.text().catch(() => "");
+    throw new Error(
+      `Could not update rendered preview metadata ${objectName}: ${metadataResponse.status} ${body.slice(
+        0,
+        300,
+      )}`,
+    );
+  }
+
+  return {
+    objectName,
+    previewUrl: previewPublicUrl(objectName),
+  };
 }
 
 async function ensureSourceFileDownloaded(input: {
@@ -1259,6 +1369,30 @@ async function processRenderCampaign(job: ClaimedJob) {
         console.log(`Render already complete locally for ${video.videoOutputId}.`);
       }
 
+      const renderedJob = getRenderJobDetails(video.videoOutputId);
+      const stagedPreview =
+        renderedJob?.output_filepath
+          ? await uploadRenderedPreviewToStorage({
+              filepath: renderedJob.output_filepath,
+              campaignId: job.campaign?.id ?? input.campaignId ?? null,
+              videoOutputId: video.videoOutputId,
+              outputFilename: video.outputFilename ?? renderedJob.output_filename,
+            }).catch((error) => {
+              const message =
+                error instanceof Error ? error.message : "Unknown preview staging error.";
+              console.warn(
+                `Preview staging failed for ${video.videoOutputId}; continuing with Drive upload. ${message}`,
+              );
+              return null;
+            })
+          : null;
+
+      if (stagedPreview) {
+        console.log(
+          `Staged rendered preview for ${video.videoOutputId}: ${stagedPreview.previewUrl}.`,
+        );
+      }
+
       console.log(`Uploading rendered video ${video.videoOutputId} to Drive.`);
       const upload = await uploadRenderJobVideoToDrive(video.videoOutputId);
       const uploadedVideo =
@@ -1281,6 +1415,8 @@ async function processRenderCampaign(job: ClaimedJob) {
         status: "done" as const,
         driveFileId: uploadedVideo.driveFileId ?? null,
         driveUrl: uploadedVideo.driveUrl,
+        stagedPreviewObjectName: stagedPreview?.objectName ?? null,
+        stagedPreviewUrl: stagedPreview?.previewUrl ?? null,
         outputFilename: uploadedVideo.outputFilename ?? null,
         durationSeconds: null,
         startedAt,
