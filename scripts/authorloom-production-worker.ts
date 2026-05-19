@@ -141,6 +141,8 @@ type RenderInstruction = {
     screenshotScale?: number | null;
     zoomLevel?: number | null;
     cropVariant?: string | null;
+    layoutTemplate?: string | null;
+    multiHookTexts?: string[] | null;
   };
   postCopy?: {
     caption?: string | null;
@@ -710,6 +712,8 @@ function factoryLayoutId(layoutId: string | null | undefined) {
     case "booktok_text_screenshot":
     case "left_cover_center_screenshot":
     case "left_cover_offset_screenshot":
+    case "booktok_compact_screenshot":
+    case "booktok_full_background_multi_hook":
     case undefined:
     case null:
       return "default_video_layout";
