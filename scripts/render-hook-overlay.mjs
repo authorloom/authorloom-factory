@@ -25,6 +25,51 @@ async function getHookFont(fontCandidates) {
   return null;
 }
 
+const hookTextShadow =
+  "0 0 3px rgba(0,0,0,0.95), 0 0 8px rgba(0,0,0,0.85), 0 2px 4px rgba(0,0,0,0.9)";
+const emojiPattern = /\p{Extended_Pictographic}/u;
+
+function splitEmojiRuns(text) {
+  const segmenter =
+    typeof Intl.Segmenter === "function"
+      ? new Intl.Segmenter("en", { granularity: "grapheme" })
+      : null;
+  const segments = segmenter
+    ? Array.from(segmenter.segment(text), (segment) => segment.segment)
+    : Array.from(text);
+  const runs = [];
+
+  for (const segment of segments) {
+    const isEmoji = emojiPattern.test(segment);
+    const previous = runs.at(-1);
+
+    if (previous && previous.isEmoji === isEmoji) {
+      previous.text += segment;
+    } else {
+      runs.push({ text: segment, isEmoji });
+    }
+  }
+
+  return runs;
+}
+
+function renderHookText(text) {
+  return splitEmojiRuns(text).map((run, index) =>
+    React.createElement(
+      "span",
+      {
+        key: `${index}-${run.isEmoji ? "emoji" : "text"}`,
+        style: {
+          display: "inline",
+          fontFamily: run.isEmoji ? "sans-serif" : "inherit",
+          textShadow: run.isEmoji ? "none" : hookTextShadow,
+        },
+      },
+      run.text,
+    ),
+  );
+}
+
 const configPath = process.argv[2];
 
 if (!configPath) {
@@ -48,17 +93,26 @@ const imageStream = await unstable_createNodejsStream(
         fontWeight: 700,
         height: Number(config.height),
         justifyContent: "center",
-        letterSpacing: "-1px",
+        letterSpacing: "0",
         lineHeight: 1.05,
         padding: "0 12px",
         textAlign: "center",
-        textShadow:
-          "0 0 3px rgba(0,0,0,0.95), 0 0 8px rgba(0,0,0,0.85), 0 2px 4px rgba(0,0,0,0.9)",
         width: Number(config.width),
         whiteSpace: "pre-line",
       },
     },
-    config.text,
+    React.createElement(
+      "div",
+      {
+        style: {
+          display: "block",
+          textAlign: "center",
+          whiteSpace: "pre-line",
+          width: "100%",
+        },
+      },
+      renderHookText(config.text),
+    ),
   ),
   {
     width: Number(config.width),
