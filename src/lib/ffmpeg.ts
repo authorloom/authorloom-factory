@@ -75,6 +75,8 @@ type RenderOptions = {
   metadataLinePlacement?: string;
   metadataLineSize?: number;
   layoutTemplate?: string;
+  layoutTemplateId?: string;
+  layoutTemplateJson?: CanvasLayoutTemplate | null;
   multiHookTexts?: string[];
   variationParameters?: Partial<RenderOptions> | null;
   proofAdjustments?: Partial<RenderOptions> | null;
@@ -83,6 +85,24 @@ type RenderOptions = {
     keywordOrder?: string[];
     renderedBookTitleLine?: string | null;
   } | null;
+};
+
+type CanvasLayoutBox = {
+  enabled?: boolean;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  label?: string;
+  fit?: "contain" | "cover" | "text-fit";
+};
+
+type CanvasLayoutTemplate = {
+  version?: number;
+  canvas?: { width?: number; height?: number };
+  safeArea?: { x?: number; y?: number; width?: number; height?: number };
+  renderTemplateId?: string;
+  elements?: Partial<Record<"hook" | "cover" | "screenshot" | "metadataLine" | "keywords", CanvasLayoutBox>>;
 };
 
 async function runCommand(
@@ -283,6 +303,7 @@ function buildImageTextFilterComplex({
   layout,
   options,
   screenshotDimensions,
+  hookOverlayInputIndex,
   hookOverlays = [],
   coverOverlay,
   metadataOverlay,
@@ -292,6 +313,7 @@ function buildImageTextFilterComplex({
   layout: Layout;
   options?: RenderOptions;
   screenshotDimensions: MediaDimensions;
+  hookOverlayInputIndex?: number | null;
   hookOverlays?: HookOverlayInput[];
   coverOverlay?: CoverOverlayInput | null;
   metadataOverlay?: OverlayInput | null;
@@ -460,6 +482,68 @@ function buildImageTextFilterComplex({
   const baseFilters = [
     `[0:v]setpts=${(1 / playbackSpeed).toFixed(5)}*PTS,scale=${scaledCanvasWidth}:${scaledCanvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY}[bg]`,
   ];
+  const customTemplate = customCanvasTemplate(effectiveOptions);
+
+  if (customTemplate && !isFullBackgroundLayout) {
+    const filters = [...baseFilters];
+    let customCurrentLabel = "bg";
+    const screenshotBox = customElementBox(customTemplate, "screenshot");
+    const hookBox = customElementBox(customTemplate, "hook");
+    const coverBox = customElementBox(customTemplate, "cover");
+    const metadataBox = customElementBox(customTemplate, "metadataLine");
+    const keywordsBox = customElementBox(customTemplate, "keywords");
+
+    if (screenshotBox) {
+      const shot = fitMediaIntoBox(screenshotBox, screenshotDimensions);
+      filters.push(
+        `[1:v]scale=${shot.width}:-2:force_original_aspect_ratio=decrease,setsar=1[shot]`,
+        `[${customCurrentLabel}][shot]overlay=x=${shot.x}:y=${shot.y}[withshot]`,
+      );
+      customCurrentLabel = "withshot";
+    }
+
+    if (hookBox && typeof hookOverlayInputIndex === "number") {
+      filters.push(
+        `[${hookOverlayInputIndex}:v]format=rgba[hook]`,
+        `[${customCurrentLabel}][hook]overlay=x=${Math.round(hookBox.x)}:y=${Math.round(hookBox.y)}[withhook]`,
+      );
+      customCurrentLabel = "withhook";
+    }
+
+    if (coverOverlay && coverBox) {
+      const cover = fitMediaIntoBox(coverBox, {
+        width: coverOverlay.width,
+        height: coverOverlay.height,
+      });
+      filters.push(
+        `[${coverOverlay.inputIndex}:v]scale=${cover.width}:-2:force_original_aspect_ratio=decrease,setsar=1[cover]`,
+        `[${customCurrentLabel}][cover]overlay=x=${cover.x}:y=${cover.y}[withcover]`,
+      );
+      customCurrentLabel = "withcover";
+    }
+
+    if (metadataOverlay && metadataBox) {
+      filters.push(
+        `[${metadataOverlay.inputIndex}:v]format=rgba[metadata]`,
+        `[${customCurrentLabel}][metadata]overlay=x=${Math.round(metadataBox.x)}:y=${Math.round(metadataBox.y)}[withmetadata]`,
+      );
+      customCurrentLabel = "withmetadata";
+    }
+
+    if (keywordsOverlay && keywordsBox) {
+      filters.push(
+        `[${keywordsOverlay.inputIndex}:v]format=rgba[keywords]`,
+        `[${customCurrentLabel}][keywords]overlay=x=${Math.round(keywordsBox.x)}:y=${Math.round(keywordsBox.y)}[${outputLabel}]`,
+      );
+      customCurrentLabel = outputLabel;
+    }
+
+    if (customCurrentLabel !== outputLabel) {
+      filters.push(`[${customCurrentLabel}]null[${outputLabel}]`);
+    }
+
+    return filters.join(";");
+  }
 
   if (isFullBackgroundLayout) {
     const timedHookFilters: string[] = [];
@@ -494,7 +578,7 @@ function buildImageTextFilterComplex({
 
   return [
     ...baseFilters,
-    "[2:v]format=rgba[hook]",
+    `[${hookOverlayInputIndex ?? 2}:v]format=rgba[hook]`,
     `[1:v]scale=${screenshotWidth}:-2:force_original_aspect_ratio=decrease,setsar=1[shot]`,
     `[bg][shot]overlay=x=${shotX}:y=${Math.round(nudgedShotY)}[withshot]`,
     `[withshot][hook]overlay=x=(W-w)/2:y=${Math.round(nudgedHookY)}[withhook]`,
@@ -608,29 +692,40 @@ async function createPostCopyOverlays({
   const isCoverLayout =
     layoutTemplate === "left_cover_center_screenshot" ||
     layoutTemplate === "left_cover_offset_screenshot";
+  const customTemplate = customCanvasTemplate(renderOptions);
+  const customMetadataBox = customElementBox(customTemplate, "metadataLine");
+  const customKeywordsBox = customElementBox(customTemplate, "keywords");
+  const metadataFit =
+    metadataLine && customMetadataBox
+      ? fitTextForBox(metadataLine, customMetadataBox, isCoverLayout ? 28 : 34)
+      : null;
+  const keywordFit =
+    keywords?.length && customKeywordsBox
+      ? fitTextForBox(keywords.join(" • "), customKeywordsBox, isCoverLayout ? 24 : 30, 16)
+      : null;
 
-  const metadataOverlay = metadataLine
+  const metadataOverlay = metadataLine && (!customTemplate || customMetadataBox)
     ? await createTextOverlayImage({
         campaignId,
         jobId,
         suffix: "metadata",
-        text: wrapText(metadataLine, 44),
-        width: 820,
-        height: metadataLine.length > 44 ? (isCoverLayout ? 82 : 96) : (isCoverLayout ? 46 : 54),
-        fontSize: isCoverLayout ? 28 : 34,
+        text: metadataFit?.text ?? wrapText(metadataLine, 44),
+        width: customMetadataBox?.width ?? 820,
+        height: customMetadataBox?.height ?? (metadataLine.length > 44 ? (isCoverLayout ? 82 : 96) : (isCoverLayout ? 46 : 54)),
+        fontSize: metadataFit?.fontSize ?? (isCoverLayout ? 28 : 34),
         shadowPreset: isCoverLayout ? "reduced" : "default",
       })
     : null;
   const keywordText = keywords?.length ? wrapText(keywords.join(" • "), 54) : "";
-  const keywordsOverlay = keywordText
+  const keywordsOverlay = keywordText && (!customTemplate || customKeywordsBox)
     ? await createTextOverlayImage({
         campaignId,
         jobId,
         suffix: "keywords",
-        text: keywordText,
-        width: 860,
-        height: keywordText.includes("\n") ? (isCoverLayout ? 90 : 110) : (isCoverLayout ? 48 : 58),
-        fontSize: isCoverLayout ? 24 : 30,
+        text: keywordFit?.text ?? keywordText,
+        width: customKeywordsBox?.width ?? 860,
+        height: customKeywordsBox?.height ?? (keywordText.includes("\n") ? (isCoverLayout ? 90 : 110) : (isCoverLayout ? 48 : 58)),
+        fontSize: keywordFit?.fontSize ?? (isCoverLayout ? 24 : 30),
         shadowPreset: isCoverLayout ? "reduced" : "default",
       })
     : null;
@@ -675,6 +770,86 @@ function parseRenderOptions(value: string | null): RenderOptions {
   }
 }
 
+function customCanvasTemplate(options: RenderOptions): CanvasLayoutTemplate | null {
+  const template = options.layoutTemplateJson;
+
+  if (!template || typeof template !== "object") return null;
+  if (template.canvas?.width !== canvasWidth || template.canvas?.height !== canvasHeight) {
+    return null;
+  }
+
+  return template;
+}
+
+function customElementBox(
+  template: CanvasLayoutTemplate | null,
+  key: "hook" | "cover" | "screenshot" | "metadataLine" | "keywords",
+) {
+  const box = template?.elements?.[key];
+
+  if (!box?.enabled) return null;
+  if (
+    typeof box.x !== "number" ||
+    typeof box.y !== "number" ||
+    typeof box.width !== "number" ||
+    typeof box.height !== "number"
+  ) {
+    return null;
+  }
+
+  return {
+    x: clampNumber(box.x, 0, canvasWidth, 0),
+    y: clampNumber(box.y, 0, canvasHeight, 0),
+    width: clampNumber(box.width, 1, canvasWidth, 1),
+    height: clampNumber(box.height, 1, canvasHeight, 1),
+    fit: box.fit,
+  };
+}
+
+function fitMediaIntoBox(
+  box: { x: number; y: number; width: number; height: number },
+  dimensions: { width: number; height: number },
+) {
+  const scale = Math.min(box.width / dimensions.width, box.height / dimensions.height);
+  const width = Math.max(1, Math.round(dimensions.width * scale));
+  const height = Math.max(1, Math.round(dimensions.height * scale));
+
+  return {
+    width,
+    height,
+    x: Math.round(box.x + (box.width - width) / 2),
+    y: Math.round(box.y + (box.height - height) / 2),
+  };
+}
+
+function charsPerLine(width: number, fontSize: number) {
+  return Math.max(8, Math.floor(width / (fontSize * 0.52)));
+}
+
+function fitTextForBox(
+  text: string,
+  box: { width: number; height: number },
+  maxFontSize: number,
+  minFontSize = 18,
+) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+
+  for (let fontSize = maxFontSize; fontSize >= minFontSize; fontSize -= 2) {
+    const wrapped = wrapText(normalized, charsPerLine(box.width - 24, fontSize));
+    const lineCount = Math.max(1, wrapped.split("\n").length);
+    const estimatedHeight = lineCount * fontSize * 1.08;
+
+    if (estimatedHeight <= box.height - 8) {
+      return { fontSize, text: wrapped };
+    }
+  }
+
+  return {
+    fontSize: minFontSize,
+    text: wrapText(normalized, charsPerLine(box.width - 24, minFontSize)),
+  };
+}
+
 function buildThumbnailIntroFilterComplex({
   mainFilterComplex,
   thumbnailInputIndex,
@@ -712,6 +887,7 @@ async function createHookOverlayImage(
   hookText: string,
   suffix = "hook",
   layoutTemplate = "booktok_text_screenshot",
+  customBox?: { width: number; height: number } | null,
 ): Promise<HookOverlayResult> {
   const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
   const overlayFilepath = path.join(tempDirectory, `${jobId}-${suffix}.png`);
@@ -724,16 +900,23 @@ async function createHookOverlayImage(
     layoutTemplate === "left_cover_center_screenshot" ||
     layoutTemplate === "left_cover_offset_screenshot";
 
-  const fontSize =
+  const defaultFontSize =
     normalizedHook.length > 160
-      ? isCoverLayout ? "36" : "42"
+      ? isCoverLayout
+        ? 36
+        : 42
       : normalizedHook.length > 120
-        ? isCoverLayout ? "40" : "46"
+        ? isCoverLayout
+          ? 40
+          : 46
         : normalizedHook.length > 90
-          ? isCoverLayout ? "44" : "50"
-          : isCoverLayout ? "50" : "58";
-
-  const overlayHeight =
+          ? isCoverLayout
+            ? 44
+            : 50
+          : isCoverLayout
+            ? 50
+            : 58;
+  const defaultOverlayHeight =
     normalizedHook.length > 160
       ? 440
       : normalizedHook.length > 120
@@ -741,19 +924,22 @@ async function createHookOverlayImage(
         : normalizedHook.length > 90
           ? 330
           : 260;
-
-  const overlayWidth = 820;
+  const overlayWidth = customBox?.width ?? 820;
+  const overlayHeight = customBox?.height ?? defaultOverlayHeight;
+  const fit = customBox
+    ? fitTextForBox(normalizedHook, customBox, defaultFontSize, 18)
+    : { fontSize: defaultFontSize, text: normalizedHook };
 
   await fs.writeFile(
     overlayConfigFilepath,
     JSON.stringify({
       fontCandidates: hookFontCandidates(),
-      fontSize,
+      fontSize: String(fit.fontSize),
       fontWeight: 600,
       height: overlayHeight,
       outputFilepath: overlayFilepath,
       shadowPreset: isCoverLayout ? "reduced" : "default",
-      text: normalizedHook,
+      text: fit.text,
       width: overlayWidth,
     }),
   );
@@ -787,6 +973,9 @@ export async function renderJob(jobId: string) {
 
   const renderOptions = parseRenderOptions(job.render_options_json);
   const layoutTemplate = renderOptions.layoutTemplate ?? "booktok_text_screenshot";
+  const customTemplate = customCanvasTemplate(renderOptions);
+  const customHookBox = customElementBox(customTemplate, "hook");
+  const customCoverBox = customElementBox(customTemplate, "cover");
   const isCoverLayout =
     layoutTemplate === "left_cover_center_screenshot" ||
     layoutTemplate === "left_cover_offset_screenshot";
@@ -830,7 +1019,7 @@ export async function renderJob(jobId: string) {
   }
 
   const hasThumbnailFile = await fileExists(job.thumbnail_filepath);
-  const hasCoverOverlay = isCoverLayout && hasThumbnailFile;
+  const hasCoverOverlay = (isCoverLayout || Boolean(customCoverBox)) && hasThumbnailFile;
   const hasThumbnailIntro = hasThumbnailFile && !hasCoverOverlay;
   const renderDurationSeconds = String(renderDuration);
   const thumbnailIntroDuration = String(thumbnailIntroDurationSeconds);
@@ -842,7 +1031,7 @@ export async function renderJob(jobId: string) {
   await fs.mkdir(outputDirectory, { recursive: true });
   markRenderJobRunning(job.id);
 
-  const hookOverlay = isFullBackgroundMultiHook
+  const hookOverlay = isFullBackgroundMultiHook || (customTemplate && !customHookBox)
     ? null
     : await createHookOverlayImage(
         job.campaign_id,
@@ -850,6 +1039,7 @@ export async function renderJob(jobId: string) {
         job.hook_text,
         "hook",
         layoutTemplate,
+        customHookBox,
       );
   const timedHookOverlays = isFullBackgroundMultiHook
     ? await Promise.all(
@@ -919,6 +1109,8 @@ export async function renderJob(jobId: string) {
   );
 
   let nextInputIndex = 2;
+
+  const hookOverlayInputIndex = hookOverlay ? nextInputIndex : null;
 
   if (hookOverlay) {
     args.push("-i", hookOverlay.filepath);
@@ -991,6 +1183,7 @@ export async function renderJob(jobId: string) {
       },
     options: renderOptions,
     screenshotDimensions,
+    hookOverlayInputIndex,
     hookOverlays: timedHookOverlayInputs,
     coverOverlay:
       hasCoverOverlay && coverInputIndex !== null && job.thumbnail_filepath

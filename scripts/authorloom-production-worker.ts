@@ -151,6 +151,8 @@ type RenderInstruction = {
     zoomLevel?: number | null;
     cropVariant?: string | null;
     layoutTemplate?: string | null;
+    layoutTemplateId?: string | null;
+    layoutTemplateJson?: unknown;
     multiHookTexts?: string[] | null;
   };
   postCopy?: {
