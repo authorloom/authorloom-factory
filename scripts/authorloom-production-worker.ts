@@ -644,9 +644,6 @@ async function uploadRenderedPreviewToStorage(input: {
   const mediaUrl = `https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(
     bucketName,
   )}/o?uploadType=media&name=${encodeURIComponent(objectName)}`;
-  const metadataUrl = `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(
-    bucketName,
-  )}/o/${encodeURIComponent(objectName)}`;
   const auth = getGoogleServiceAccountAuth({ impersonateWorkspace: false });
   const mediaHeaders = await auth.getRequestHeaders(mediaUrl);
   const buffer = await fs.readFile(input.filepath);
@@ -664,29 +661,6 @@ async function uploadRenderedPreviewToStorage(input: {
     const body = await mediaResponse.text().catch(() => "");
     throw new Error(
       `Could not upload rendered preview ${objectName} to Cloud Storage: ${mediaResponse.status} ${body.slice(
-        0,
-        300,
-      )}`,
-    );
-  }
-
-  const metadataHeaders = await auth.getRequestHeaders(metadataUrl);
-  const metadataResponse = await fetch(metadataUrl, {
-    method: "PATCH",
-    headers: {
-      ...authHeadersToRecord(metadataHeaders),
-      "content-type": "application/json; charset=UTF-8",
-    },
-    body: JSON.stringify({
-      contentType: "video/mp4",
-      cacheControl: "private, max-age=3600",
-    }),
-  });
-
-  if (!metadataResponse.ok) {
-    const body = await metadataResponse.text().catch(() => "");
-    console.warn(
-      `Could not update rendered preview metadata ${objectName}; continuing with uploaded preview. ${metadataResponse.status} ${body.slice(
         0,
         300,
       )}`,
