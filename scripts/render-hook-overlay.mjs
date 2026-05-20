@@ -27,6 +27,8 @@ async function getHookFont(fontCandidates) {
 
 const hookTextShadow =
   "2.5px 0 0 rgba(0,0,0,0.96), -2.5px 0 0 rgba(0,0,0,0.96), 0 2.5px 0 rgba(0,0,0,0.96), 0 -2.5px 0 rgba(0,0,0,0.96), 1.8px 1.8px 0 rgba(0,0,0,0.92), -1.8px 1.8px 0 rgba(0,0,0,0.92), 1.8px -1.8px 0 rgba(0,0,0,0.92), -1.8px -1.8px 0 rgba(0,0,0,0.92), 0 0 9px rgba(0,0,0,0.72), 0 0 18px rgba(0,0,0,0.44)";
+const reducedTextShadow =
+  "2.5px 0 0 rgba(0,0,0,0.96), -2.5px 0 0 rgba(0,0,0,0.96), 0 2.5px 0 rgba(0,0,0,0.96), 0 -2.5px 0 rgba(0,0,0,0.96), 1.5px 1.5px 0 rgba(0,0,0,0.88), -1.5px 1.5px 0 rgba(0,0,0,0.88), 1.5px -1.5px 0 rgba(0,0,0,0.88), -1.5px -1.5px 0 rgba(0,0,0,0.88), 0 0 5px rgba(0,0,0,0.38), 0 0 10px rgba(0,0,0,0.2)";
 
 const configPath = process.argv[2];
 
@@ -37,6 +39,9 @@ if (!configPath) {
 const config = await readJson(configPath);
 const hookFont = await getHookFont(config.fontCandidates ?? []);
 const fontFamily = hookFont?.name ?? "sans-serif";
+const fontWeight = Number(config.fontWeight ?? 600);
+const textShadow =
+  config.shadowPreset === "reduced" ? reducedTextShadow : hookTextShadow;
 const imageStream = await unstable_createNodejsStream(
   React.createElement(
     "div",
@@ -48,14 +53,14 @@ const imageStream = await unstable_createNodejsStream(
         display: "flex",
         fontFamily,
         fontSize: Number(config.fontSize),
-        fontWeight: 600,
+        fontWeight,
         height: Number(config.height),
         justifyContent: "center",
         letterSpacing: "0",
         lineHeight: 1.05,
         padding: "0 12px",
         textAlign: "center",
-        textShadow: hookTextShadow,
+        textShadow,
         width: Number(config.width),
         whiteSpace: "pre-line",
       },
@@ -71,7 +76,7 @@ const imageStream = await unstable_createNodejsStream(
           {
             name: hookFont.name,
             data: hookFont.data,
-            weight: 600,
+            weight: fontWeight,
             style: "normal",
           },
         ]

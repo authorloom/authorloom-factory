@@ -359,6 +359,11 @@ function buildImageTextFilterComplex({
   const coverY = coverOverlay
     ? Math.max(Math.round(hookY + layout.hookHeight + 10), isCoverOffsetLayout ? 520 : 500)
     : 0;
+  const coverX = coverOverlay
+    ? isCoverLayout
+      ? Math.round(canvasWidth * 0.34 - coverWidth / 2)
+      : "(W-w)/2"
+    : "(W-w)/2";
   const copySafeBottom = canvasHeight - Math.round(safeBottom * 0.36);
   const copyBlockBottomPadding = 24;
   const copyGap = 10;
@@ -403,7 +408,7 @@ function buildImageTextFilterComplex({
   const centeredShotY =
     minShotY + Math.max(0, Math.round((availableShotHeight - screenshotHeight) / 2));
   const requestedShotY =
-    (isCompactLayout ? maxShotY : isCoverLayout ? centeredShotY : centeredShotY) +
+    (isCompactLayout ? maxShotY : isCoverLayout ? minShotY : centeredShotY) +
     shotYOffset;
   const shotY = Math.max(minShotY, Math.min(maxShotY, requestedShotY));
 
@@ -496,7 +501,7 @@ function buildImageTextFilterComplex({
     ...(coverOverlay
       ? [
           `[${coverOverlay.inputIndex}:v]scale=${coverWidth}:-2:force_original_aspect_ratio=decrease,setsar=1[cover]`,
-          `[withhook][cover]overlay=x=(W-w)/2:y=${Math.round(nudgedCoverY)}[withcover]`,
+          `[withhook][cover]overlay=x=${coverX}:y=${Math.round(nudgedCoverY)}[withcover]`,
         ]
       : []),
     ...textFilters,
@@ -533,6 +538,7 @@ async function createTextOverlayImage({
   width,
   height,
   fontSize,
+  shadowPreset,
 }: {
   campaignId: string;
   jobId: string;
@@ -541,6 +547,7 @@ async function createTextOverlayImage({
   width: number;
   height: number;
   fontSize: number;
+  shadowPreset?: "default" | "reduced";
 }) {
   const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
   const overlayFilepath = path.join(tempDirectory, `${jobId}-${suffix}.png`);
@@ -552,8 +559,10 @@ async function createTextOverlayImage({
     JSON.stringify({
       fontCandidates: hookFontCandidates(),
       fontSize: String(fontSize),
+      fontWeight: 600,
       height,
       outputFilepath: overlayFilepath,
+      shadowPreset,
       text,
       width,
     }),
@@ -595,6 +604,10 @@ async function createPostCopyOverlays({
   const keywords = (
     postCopy?.keywordOrder?.length ? postCopy.keywordOrder : postCopy?.keywords
   )?.filter((keyword): keyword is string => Boolean(keyword?.trim()));
+  const layoutTemplate = renderOptions.layoutTemplate ?? "booktok_text_screenshot";
+  const isCoverLayout =
+    layoutTemplate === "left_cover_center_screenshot" ||
+    layoutTemplate === "left_cover_offset_screenshot";
 
   const metadataOverlay = metadataLine
     ? await createTextOverlayImage({
@@ -603,8 +616,9 @@ async function createPostCopyOverlays({
         suffix: "metadata",
         text: wrapText(metadataLine, 44),
         width: 820,
-        height: metadataLine.length > 44 ? 96 : 54,
-        fontSize: 34,
+        height: metadataLine.length > 44 ? (isCoverLayout ? 82 : 96) : (isCoverLayout ? 46 : 54),
+        fontSize: isCoverLayout ? 28 : 34,
+        shadowPreset: isCoverLayout ? "reduced" : "default",
       })
     : null;
   const keywordText = keywords?.length ? wrapText(keywords.join(" • "), 54) : "";
@@ -615,8 +629,9 @@ async function createPostCopyOverlays({
         suffix: "keywords",
         text: keywordText,
         width: 860,
-        height: keywordText.includes("\n") ? 110 : 58,
-        fontSize: 30,
+        height: keywordText.includes("\n") ? (isCoverLayout ? 90 : 110) : (isCoverLayout ? 48 : 58),
+        fontSize: isCoverLayout ? 24 : 30,
+        shadowPreset: isCoverLayout ? "reduced" : "default",
       })
     : null;
 
@@ -678,8 +693,8 @@ function buildThumbnailIntroFilterComplex({
 
 function hookFontCandidates() {
   return [
-    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Bold.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Semibold.ttf"),
+    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Bold.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "ProximaNova-Semibold.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "ProximaNova-SemiBold.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Semibold.ttf"),
@@ -696,6 +711,7 @@ async function createHookOverlayImage(
   jobId: string,
   hookText: string,
   suffix = "hook",
+  layoutTemplate = "booktok_text_screenshot",
 ): Promise<HookOverlayResult> {
   const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
   const overlayFilepath = path.join(tempDirectory, `${jobId}-${suffix}.png`);
@@ -704,15 +720,18 @@ async function createHookOverlayImage(
   await fs.mkdir(tempDirectory, { recursive: true });
 
   const normalizedHook = hookText.replace(/\s+/g, " ").trim();
+  const isCoverLayout =
+    layoutTemplate === "left_cover_center_screenshot" ||
+    layoutTemplate === "left_cover_offset_screenshot";
 
   const fontSize =
     normalizedHook.length > 160
-      ? "42"
+      ? isCoverLayout ? "36" : "42"
       : normalizedHook.length > 120
-        ? "46"
+        ? isCoverLayout ? "40" : "46"
         : normalizedHook.length > 90
-          ? "50"
-          : "58";
+          ? isCoverLayout ? "44" : "50"
+          : isCoverLayout ? "50" : "58";
 
   const overlayHeight =
     normalizedHook.length > 160
@@ -730,8 +749,10 @@ async function createHookOverlayImage(
     JSON.stringify({
       fontCandidates: hookFontCandidates(),
       fontSize,
+      fontWeight: 600,
       height: overlayHeight,
       outputFilepath: overlayFilepath,
+      shadowPreset: isCoverLayout ? "reduced" : "default",
       text: normalizedHook,
       width: overlayWidth,
     }),
@@ -823,11 +844,23 @@ export async function renderJob(jobId: string) {
 
   const hookOverlay = isFullBackgroundMultiHook
     ? null
-    : await createHookOverlayImage(job.campaign_id, job.id, job.hook_text);
+    : await createHookOverlayImage(
+        job.campaign_id,
+        job.id,
+        job.hook_text,
+        "hook",
+        layoutTemplate,
+      );
   const timedHookOverlays = isFullBackgroundMultiHook
     ? await Promise.all(
         multiHookTexts.map((hookText, index) =>
-          createHookOverlayImage(job.campaign_id, job.id, hookText, `hook-${index}`),
+          createHookOverlayImage(
+            job.campaign_id,
+            job.id,
+            hookText,
+            `hook-${index}`,
+            layoutTemplate,
+          ),
         ),
       )
     : [];
