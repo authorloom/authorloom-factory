@@ -6,9 +6,13 @@ import { google } from "googleapis";
 import { env } from "@/lib/env";
 import { paths } from "@/lib/paths";
 
-export const googleApiScopes = [
+export const googleWorkspaceScopes = [
   "https://www.googleapis.com/auth/drive",
   "https://www.googleapis.com/auth/spreadsheets",
+] as const;
+
+export const googleApiScopes = [
+  ...googleWorkspaceScopes,
   "https://www.googleapis.com/auth/devstorage.read_write",
 ] as const;
 
@@ -55,7 +59,7 @@ export function getGoogleServiceAccountAuth(options?: {
     return new google.auth.JWT({
       email: env.GOOGLE_CLIENT_EMAIL,
       key: normalizePrivateKey(env.GOOGLE_PRIVATE_KEY),
-      scopes: [...googleApiScopes],
+      scopes: [...googleWorkspaceScopes],
       subject,
     });
   }
@@ -72,7 +76,7 @@ export function getGoogleServiceAccountAuth(options?: {
       return new google.auth.JWT({
         email: credentials.client_email,
         key: normalizePrivateKey(credentials.private_key),
-        scopes: [...googleApiScopes],
+        scopes: [...googleWorkspaceScopes],
         subject,
       });
     }
