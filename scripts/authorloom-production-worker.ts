@@ -295,7 +295,7 @@ async function patchCloudRunScaling(input: {
   maxInstances: number;
 }) {
   const updateMask = [
-    "scaling.minInstanceCount",
+    "template.scaling.minInstanceCount",
     "template.scaling.maxInstanceCount",
   ].join(",");
   const response = await fetch(
@@ -308,8 +308,12 @@ async function patchCloudRunScaling(input: {
         accept: "application/json",
       },
       body: JSON.stringify({
-        scaling: { minInstanceCount: input.minInstances },
-        template: { scaling: { maxInstanceCount: input.maxInstances } },
+        template: {
+          scaling: {
+            minInstanceCount: input.minInstances,
+            maxInstanceCount: input.maxInstances,
+          },
+        },
       }),
     },
   );
