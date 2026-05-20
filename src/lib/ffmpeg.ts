@@ -22,9 +22,9 @@ const safeTop = 160;
 const safeBottom = 340;
 const safeContentBottom = canvasHeight - safeBottom;
 
-const maxScreenshotWidth = 760;
+const maxScreenshotWidth = 820;
 const minScreenshotWidth = 440;
-const hookScreenshotGap = 24;
+const hookScreenshotGap = 8;
 const defaultHookYOffset = 156;
 
 type HookOverlayResult = {
@@ -306,8 +306,8 @@ function buildImageTextFilterComplex({
   const zoomLevel = clampNumber(effectiveOptions.zoomLevel, 1, 1.08, 1);
   const screenshotScale = clampNumber(
     effectiveOptions.screenshotScale,
-    0.7,
-    1.25,
+    0.9,
+    1.1,
     1,
   );
   const screenshotPlacement = effectiveOptions.screenshotPlacement ?? "center";
@@ -346,38 +346,46 @@ function buildImageTextFilterComplex({
         : hookPlacement === "middle"
           ? Math.round(canvasHeight * 0.32)
           : layout.hookY;
-  const copyBlockHeight =
-    (metadataOverlay?.height ?? 0) + (keywordsOverlay?.height ?? 0);
   const coverWidth = coverOverlay
     ? isCoverOffsetLayout
-      ? 235
-      : 200
+      ? 230
+      : 210
     : 0;
   const coverHeight = coverOverlay
     ? Math.round(coverOverlay.height * (coverWidth / coverOverlay.width))
     : 0;
   const coverY = coverOverlay
-    ? Math.max(Math.round(hookY + layout.hookHeight + 18), isCoverOffsetLayout ? 560 : 600)
+    ? Math.max(Math.round(hookY + layout.hookHeight + 10), isCoverOffsetLayout ? 520 : 500)
     : 0;
+  const copySafeBottom = canvasHeight - Math.round(safeBottom * 0.36);
+  const copyBlockBottomPadding = 24;
+  const copyGap = 10;
+  const lowestMetadataY =
+    copySafeBottom -
+    copyBlockBottomPadding -
+    (metadataOverlay?.height ?? 0) -
+    (keywordsOverlay?.height ?? 0) -
+    ((metadataOverlay && keywordsOverlay) ? 8 : 0);
   const minShotY = Math.round(
     coverOverlay
-      ? coverY + coverHeight + 24
+      ? coverY + coverHeight + 10
       : hookY + layout.hookHeight + hookScreenshotGap,
   );
-  const maxShotBottom = Math.max(
-    minShotY + 300,
-    safeContentBottom - copyBlockHeight - (isCompactLayout ? 18 : 40),
-  );
+  const maxShotBottom = Math.max(minShotY + 300, lowestMetadataY - copyGap);
   const availableShotHeight = Math.max(300, maxShotBottom - minShotY);
   const widthThatFitsAvailableHeight = Math.floor(
     screenshotDimensions.width * (availableShotHeight / screenshotDimensions.height),
   );
+  const desiredScreenshotWidth = Math.round(
+    (isCoverCenterLayout ? 560 : isCoverOffsetLayout ? 600 : maxScreenshotWidth) *
+      screenshotScale,
+  );
   const screenshotWidth = Math.max(
     320,
     Math.min(
-      isCoverCenterLayout ? 500 : isCoverOffsetLayout ? 540 : maxScreenshotWidth,
+      isCoverCenterLayout ? 560 : isCoverOffsetLayout ? 600 : maxScreenshotWidth,
       widthThatFitsAvailableHeight,
-      Math.round(layout.screenshotWidth * screenshotScale),
+      desiredScreenshotWidth,
     ),
   );
   const screenshotHeight = Math.round(
@@ -385,9 +393,9 @@ function buildImageTextFilterComplex({
   );
   const shotYOffset =
     screenshotPlacement === "upper-center"
-      ? -80
+      ? -30
       : screenshotPlacement === "lower-center"
-        ? 120
+        ? 30
         : 0;
   const maxShotY = Math.max(minShotY, maxShotBottom - screenshotHeight);
   const centeredShotY =
@@ -397,20 +405,10 @@ function buildImageTextFilterComplex({
     shotYOffset;
   const shotY = Math.max(minShotY, Math.min(maxShotY, requestedShotY));
 
-  const copySafeBottom = canvasHeight - Math.round(safeBottom * 0.36);
-  const copyBlockBottomPadding = 24;
-  const preferredMetadataY = Math.round(
-    shotY + screenshotHeight + (isCoverLayout ? 74 : 86),
-  );
-  const lowestMetadataY =
-    copySafeBottom -
-    copyBlockBottomPadding -
-    (metadataOverlay?.height ?? 0) -
-    (keywordsOverlay?.height ?? 0) -
-    ((metadataOverlay && keywordsOverlay) ? 8 : 0);
+  const preferredMetadataY = Math.round(shotY + screenshotHeight + copyGap);
   const metadataY = Math.max(
     preferredMetadataY,
-    Math.min(lowestMetadataY, preferredMetadataY + 90),
+    Math.min(lowestMetadataY, preferredMetadataY + 24),
   );
   const keywordsY = Math.min(
     copySafeBottom - copyBlockBottomPadding - (keywordsOverlay?.height ?? 0),
