@@ -26,7 +26,7 @@ const maxScreenshotWidth = 820;
 const minScreenshotWidth = 440;
 const hookScreenshotGap = 8;
 const defaultHookYOffset = 156;
-const defaultLayoutVerticalNudge = -80;
+const defaultLayoutVerticalNudge = -160;
 
 type HookOverlayResult = {
   filepath: string;
