@@ -666,8 +666,8 @@ async function uploadRenderedPreviewToStorage(input: {
 
   if (!metadataResponse.ok) {
     const body = await metadataResponse.text().catch(() => "");
-    throw new Error(
-      `Could not update rendered preview metadata ${objectName}: ${metadataResponse.status} ${body.slice(
+    console.warn(
+      `Could not update rendered preview metadata ${objectName}; continuing with uploaded preview. ${metadataResponse.status} ${body.slice(
         0,
         300,
       )}`,
