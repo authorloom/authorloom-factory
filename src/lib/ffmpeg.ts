@@ -26,6 +26,7 @@ const maxScreenshotWidth = 820;
 const minScreenshotWidth = 440;
 const hookScreenshotGap = 8;
 const defaultHookYOffset = 156;
+const defaultLayoutVerticalNudge = -80;
 
 type HookOverlayResult = {
   filepath: string;
@@ -318,6 +319,7 @@ function buildImageTextFilterComplex({
   const isCoverOffsetLayout = layoutTemplate === "left_cover_offset_screenshot";
   const isCoverLayout = isCoverCenterLayout || isCoverOffsetLayout;
   const isFullBackgroundLayout = layoutTemplate === "booktok_full_background_multi_hook";
+  const layoutVerticalNudge = isFullBackgroundLayout ? 0 : defaultLayoutVerticalNudge;
   const cropVariant = effectiveOptions.cropVariant ?? "center";
   const scaledCanvasWidth = Math.round(canvasWidth * zoomLevel);
   const scaledCanvasHeight = Math.round(canvasHeight * zoomLevel);
@@ -414,13 +416,26 @@ function buildImageTextFilterComplex({
     copySafeBottom - copyBlockBottomPadding - (keywordsOverlay?.height ?? 0),
     metadataY + (metadataOverlay?.height ?? 0) + 8,
   );
+  const nudgedHookY = Math.max(safeTop + 16, hookY + layoutVerticalNudge);
+  const nudgedShotY = Math.max(nudgedHookY + layout.hookHeight + 8, shotY + layoutVerticalNudge);
+  const nudgedCoverY = coverOverlay
+    ? Math.max(nudgedHookY + layout.hookHeight + 8, coverY + layoutVerticalNudge)
+    : coverY;
+  const nudgedMetadataY = Math.max(
+    nudgedShotY + screenshotHeight + copyGap,
+    metadataY + layoutVerticalNudge,
+  );
+  const nudgedKeywordsY = Math.max(
+    nudgedMetadataY + (metadataOverlay?.height ?? 0) + 8,
+    keywordsY + layoutVerticalNudge,
+  );
   const textFilters: string[] = [];
   let currentLabel = coverOverlay ? "withcover" : "withhook";
 
   if (metadataOverlay) {
     textFilters.push(
       `[${metadataOverlay.inputIndex}:v]format=rgba[metadata]`,
-      `[${currentLabel}][metadata]overlay=x=(W-w)/2:y=${metadataY}[withmetadata]`,
+      `[${currentLabel}][metadata]overlay=x=(W-w)/2:y=${nudgedMetadataY}[withmetadata]`,
     );
     currentLabel = "withmetadata";
   }
@@ -428,7 +443,7 @@ function buildImageTextFilterComplex({
   if (keywordsOverlay) {
     textFilters.push(
       `[${keywordsOverlay.inputIndex}:v]format=rgba[keywords]`,
-      `[${currentLabel}][keywords]overlay=x=(W-w)/2:y=${keywordsY}[${outputLabel}]`,
+      `[${currentLabel}][keywords]overlay=x=(W-w)/2:y=${nudgedKeywordsY}[${outputLabel}]`,
     );
     currentLabel = outputLabel;
   }
@@ -456,7 +471,7 @@ function buildImageTextFilterComplex({
 
       timedHookFilters.push(
         `[${overlay.inputIndex}:v]format=rgba[${hookLabel}]`,
-        `[${timedHookInputLabel}][${hookLabel}]overlay=x=(W-w)/2:y=${Math.round(hookY)}${enable}[${outputHookLabel}]`,
+        `[${timedHookInputLabel}][${hookLabel}]overlay=x=(W-w)/2:y=${Math.round(nudgedHookY)}${enable}[${outputHookLabel}]`,
       );
       timedHookInputLabel = outputHookLabel;
     });
@@ -476,12 +491,12 @@ function buildImageTextFilterComplex({
     ...baseFilters,
     "[2:v]format=rgba[hook]",
     `[1:v]scale=${screenshotWidth}:-2:force_original_aspect_ratio=decrease,setsar=1[shot]`,
-    `[bg][shot]overlay=x=${shotX}:y=${Math.round(shotY)}[withshot]`,
-    `[withshot][hook]overlay=x=(W-w)/2:y=${Math.round(hookY)}[withhook]`,
+    `[bg][shot]overlay=x=${shotX}:y=${Math.round(nudgedShotY)}[withshot]`,
+    `[withshot][hook]overlay=x=(W-w)/2:y=${Math.round(nudgedHookY)}[withhook]`,
     ...(coverOverlay
       ? [
           `[${coverOverlay.inputIndex}:v]scale=${coverWidth}:-2:force_original_aspect_ratio=decrease,setsar=1[cover]`,
-          `[withhook][cover]overlay=x=(W-w)/2:y=${coverY}[withcover]`,
+          `[withhook][cover]overlay=x=(W-w)/2:y=${Math.round(nudgedCoverY)}[withcover]`,
         ]
       : []),
     ...textFilters,

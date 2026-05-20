@@ -1,5 +1,6 @@
 import { ConvexHttpClient } from "convex/browser";
 import { anyApi } from "convex/server";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -40,7 +41,7 @@ const pollMs = Number(process.env.AUTHORLOOM_WORKER_POLL_MS ?? 15_000);
 const healthPort = process.env.PORT ? Number(process.env.PORT) : null;
 const workerId =
   process.env.AUTHORLOOM_WORKER_ID?.trim() ||
-  `authorloom-factory-${process.pid}`;
+  `authorloom-factory-${process.env.K_REVISION ?? "local"}-${process.env.HOSTNAME ?? randomUUID()}`;
 const workerSecret = process.env.AUTHORLOOM_WORKER_SECRET?.trim();
 const convexUrl =
   process.env.AUTHORLOOM_CONVEX_URL?.trim() ||
