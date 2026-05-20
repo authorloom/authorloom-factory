@@ -38,6 +38,8 @@ type Id<TableName extends string> = string & { __tableName?: TableName };
 
 const once = process.argv.includes("--once");
 const pollMs = Number(process.env.AUTHORLOOM_WORKER_POLL_MS ?? 15_000);
+const workerMode = process.env.AUTHORLOOM_WORKER_MODE?.trim() ?? "poll";
+const taskOnlyMode = workerMode === "tasks";
 const healthPort = process.env.PORT ? Number(process.env.PORT) : null;
 const workerId =
   process.env.AUTHORLOOM_WORKER_ID?.trim() ||
@@ -1778,6 +1780,11 @@ function startHealthServer() {
 async function main() {
   startHealthServer();
   console.log(`Authorloom production worker started as ${workerId}.`);
+
+  if (taskOnlyMode) {
+    console.log("Cloud Tasks mode enabled; background polling is disabled.");
+    return;
+  }
 
   do {
     await tick();
