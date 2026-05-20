@@ -9,7 +9,7 @@ import { paths } from "@/lib/paths";
 export const googleApiScopes = [
   "https://www.googleapis.com/auth/drive",
   "https://www.googleapis.com/auth/spreadsheets",
-  "https://www.googleapis.com/auth/devstorage.read_only",
+  "https://www.googleapis.com/auth/devstorage.read_write",
 ] as const;
 
 export function getGoogleOAuthTokenPath() {
