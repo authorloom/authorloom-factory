@@ -65,7 +65,7 @@ const scalerService =
   process.env.K_SERVICE?.trim();
 const scalerMaxInstances = Math.max(
   1,
-  Number(process.env.AUTHORLOOM_SCALER_MAX_INSTANCES ?? 30),
+  Number(process.env.AUTHORLOOM_SCALER_MAX_INSTANCES ?? 28),
 );
 
 if (!convexUrl) {
@@ -236,7 +236,7 @@ function targetInstancesForQueueDepth(activeJobs: number) {
   if (activeJobs <= 1_000) return 14;
   if (activeJobs <= 2_000) return 17;
   if (activeJobs <= 5_000) return 20;
-  return 30;
+  return 28;
 }
 
 async function cloudRunAccessToken() {
