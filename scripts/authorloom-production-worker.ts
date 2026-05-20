@@ -68,6 +68,7 @@ const scalerMaxInstances = Math.max(
   1,
   Number(process.env.AUTHORLOOM_SCALER_MAX_INSTANCES ?? 28),
 );
+const taskSecret = process.env.AUTHORLOOM_TASK_SECRET?.trim();
 
 if (!convexUrl) {
   throw new Error(
@@ -94,6 +95,11 @@ type ClaimedJob = {
   } | null;
   campaignId?: Id<"campaigns"> | null;
   input?: unknown;
+};
+
+type RenderTaskRequest = {
+  productionJobId?: string;
+  idempotencyKey?: string;
 };
 
 type RenderAssetRef = {
@@ -1580,6 +1586,110 @@ async function tick() {
   await processJob(claimResult.job);
 }
 
+async function readJsonBody(request: http.IncomingMessage) {
+  const chunks: Buffer[] = [];
+
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  if (chunks.length === 0) {
+    return {};
+  }
+
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+}
+
+async function handleRenderTask(
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+) {
+  if (request.method !== "POST") {
+    response.writeHead(405, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: false, message: "Method not allowed." }));
+    return;
+  }
+
+  const providedSecret =
+    request.headers["x-authorloom-task-secret"]?.toString().trim() ?? "";
+
+  if (!taskSecret || providedSecret !== taskSecret) {
+    response.writeHead(401, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: false, message: "Unauthorized." }));
+    return;
+  }
+
+  let body: RenderTaskRequest;
+
+  try {
+    const parsed = await readJsonBody(request);
+    body = parsed && typeof parsed === "object" ? (parsed as RenderTaskRequest) : {};
+  } catch (error) {
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        ok: false,
+        message: error instanceof Error ? error.message : "Invalid JSON body.",
+      }),
+    );
+    return;
+  }
+
+  const idempotencyKey = body.idempotencyKey?.trim();
+
+  if (!idempotencyKey) {
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        ok: false,
+        message: "idempotencyKey is required.",
+      }),
+    );
+    return;
+  }
+
+  console.log(
+    `Cloud Task received for ${body.productionJobId ?? "unknown job"} (${idempotencyKey}).`,
+  );
+
+  const claim = await client.mutation(api.productionJobs.claimNext, {
+    workerId,
+    workerSecret: requiredWorkerSecret,
+    types: ["render_campaign_videos"],
+    idempotencyKey,
+  });
+  const claimResult = claim as {
+    success: boolean;
+    message?: string;
+    job?: ClaimedJob | null;
+  };
+
+  if (!claimResult.success) {
+    throw new Error(claimResult.message ?? "Could not claim production job.");
+  }
+
+  if (!claimResult.job) {
+    console.log(
+      `No queued matching render job for Cloud Task ${body.productionJobId ?? idempotencyKey}; treating as already handled.`,
+    );
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: true, claimed: false }));
+    return;
+  }
+
+  lastClaimedJobId = claimResult.job.job.id;
+  await processJob(claimResult.job);
+
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(
+    JSON.stringify({
+      ok: true,
+      claimed: true,
+      productionJobId: claimResult.job.job.id,
+    }),
+  );
+}
+
 function startHealthServer() {
   if (!healthPort || !Number.isFinite(healthPort)) {
     return;
@@ -1600,6 +1710,27 @@ function startHealthServer() {
     }
 
     const requestUrl = new URL(request.url ?? "/", "http://localhost");
+
+    if (requestUrl.pathname === "/tasks/render") {
+      try {
+        await handleRenderTask(request, response);
+      } catch (error) {
+        console.error("Cloud Task render request failed.");
+        console.error(error instanceof Error ? error.message : error);
+        response.writeHead(500, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            ok: false,
+            message:
+              error instanceof Error
+                ? error.message
+                : "Cloud Task render request failed.",
+          }),
+        );
+      }
+
+      return;
+    }
 
     if (requestUrl.pathname === "/scale-check") {
       const providedSecret =
