@@ -278,8 +278,12 @@ async function getCloudRunService(accessToken: string) {
   return {
     serviceName,
     service: (await response.json()) as {
-      scaling?: { minInstanceCount?: number | string };
-      template?: { scaling?: { maxInstanceCount?: number | string } };
+      template?: {
+        scaling?: {
+          minInstanceCount?: number | string;
+          maxInstanceCount?: number | string;
+        };
+      };
     },
   };
 }
@@ -335,7 +339,7 @@ async function runScaleCheck() {
   const targetMaxInstances = Math.max(scalerMaxInstances, targetMinInstances);
   const accessToken = await cloudRunAccessToken();
   const { serviceName, service } = await getCloudRunService(accessToken);
-  const currentMin = Number(service.scaling?.minInstanceCount ?? 0);
+  const currentMin = Number(service.template?.scaling?.minInstanceCount ?? 0);
   const currentMax = Number(service.template?.scaling?.maxInstanceCount ?? 0);
 
   if (currentMin !== targetMinInstances || currentMax !== targetMaxInstances) {
