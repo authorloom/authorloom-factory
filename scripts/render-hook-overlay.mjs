@@ -26,13 +26,13 @@ async function getHookFont(fontCandidates) {
 }
 
 const hookTextShadow =
-  "2.75px 0 0 rgba(0,0,0,0.98), -2.75px 0 0 rgba(0,0,0,0.98), 0 2.75px 0 rgba(0,0,0,0.98), 0 -2.75px 0 rgba(0,0,0,0.98), 2px 2px 0 rgba(0,0,0,0.94), -2px 2px 0 rgba(0,0,0,0.94), 2px -2px 0 rgba(0,0,0,0.94), -2px -2px 0 rgba(0,0,0,0.94), 0 1px 5px rgba(0,0,0,0.16)";
+  "4px 0 0 rgba(0,0,0,0.98), -4px 0 0 rgba(0,0,0,0.98), 0 4px 0 rgba(0,0,0,0.98), 0 -4px 0 rgba(0,0,0,0.98), 3px 3px 0 rgba(0,0,0,0.95), -3px 3px 0 rgba(0,0,0,0.95), 3px -3px 0 rgba(0,0,0,0.95), -3px -3px 0 rgba(0,0,0,0.95), 0 1px 4px rgba(0,0,0,0.12)";
 const reducedTextShadow =
-  "2.25px 0 0 rgba(0,0,0,0.96), -2.25px 0 0 rgba(0,0,0,0.96), 0 2.25px 0 rgba(0,0,0,0.96), 0 -2.25px 0 rgba(0,0,0,0.96), 1.5px 1.5px 0 rgba(0,0,0,0.92), -1.5px 1.5px 0 rgba(0,0,0,0.92), 1.5px -1.5px 0 rgba(0,0,0,0.92), -1.5px -1.5px 0 rgba(0,0,0,0.92), 0 1px 4px rgba(0,0,0,0.14)";
+  "3px 0 0 rgba(0,0,0,0.97), -3px 0 0 rgba(0,0,0,0.97), 0 3px 0 rgba(0,0,0,0.97), 0 -3px 0 rgba(0,0,0,0.97), 2.25px 2.25px 0 rgba(0,0,0,0.94), -2.25px 2.25px 0 rgba(0,0,0,0.94), 2.25px -2.25px 0 rgba(0,0,0,0.94), -2.25px -2.25px 0 rgba(0,0,0,0.94), 0 1px 3px rgba(0,0,0,0.1)";
 const subtleTextShadow =
-  "2.5px 0 0 rgba(0,0,0,0.98), -2.5px 0 0 rgba(0,0,0,0.98), 0 2.5px 0 rgba(0,0,0,0.98), 0 -2.5px 0 rgba(0,0,0,0.98), 1.75px 1.75px 0 rgba(0,0,0,0.94), -1.75px 1.75px 0 rgba(0,0,0,0.94), 1.75px -1.75px 0 rgba(0,0,0,0.94), -1.75px -1.75px 0 rgba(0,0,0,0.94), 0 1px 4px rgba(0,0,0,0.14)";
+  "4px 0 0 rgba(0,0,0,0.98), -4px 0 0 rgba(0,0,0,0.98), 0 4px 0 rgba(0,0,0,0.98), 0 -4px 0 rgba(0,0,0,0.98), 3px 3px 0 rgba(0,0,0,0.95), -3px 3px 0 rgba(0,0,0,0.95), 3px -3px 0 rgba(0,0,0,0.95), -3px -3px 0 rgba(0,0,0,0.95), 0 1px 4px rgba(0,0,0,0.12)";
 const copyTextShadow =
-  "1.25px 0 0 rgba(0,0,0,0.96), -1.25px 0 0 rgba(0,0,0,0.96), 0 1.25px 0 rgba(0,0,0,0.96), 0 -1.25px 0 rgba(0,0,0,0.96), 1px 1px 0 rgba(0,0,0,0.9), -1px 1px 0 rgba(0,0,0,0.9), 1px -1px 0 rgba(0,0,0,0.9), -1px -1px 0 rgba(0,0,0,0.9), 0 1px 3px rgba(0,0,0,0.12)";
+  "2px 0 0 rgba(0,0,0,0.96), -2px 0 0 rgba(0,0,0,0.96), 0 2px 0 rgba(0,0,0,0.96), 0 -2px 0 rgba(0,0,0,0.96), 1.5px 1.5px 0 rgba(0,0,0,0.92), -1.5px 1.5px 0 rgba(0,0,0,0.92), 1.5px -1.5px 0 rgba(0,0,0,0.92), -1.5px -1.5px 0 rgba(0,0,0,0.92), 0 1px 3px rgba(0,0,0,0.1)";
 
 const configPath = process.argv[2];
 
