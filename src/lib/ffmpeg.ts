@@ -76,6 +76,10 @@ type RenderOptions = {
   layoutTemplate?: string;
   layoutTemplateId?: string;
   layoutTemplateJson?: CanvasLayoutTemplate | null;
+  layoutTemplateAlternates?: {
+    portrait?: CanvasLayoutTemplateAlternate | null;
+    landscape?: CanvasLayoutTemplateAlternate | null;
+  } | null;
   multiHookTexts?: string[];
   variationParameters?: Partial<RenderOptions> | null;
   proofAdjustments?: Partial<RenderOptions> | null;
@@ -84,6 +88,12 @@ type RenderOptions = {
     keywordOrder?: string[];
     renderedBookTitleLine?: string | null;
   } | null;
+};
+
+type CanvasLayoutTemplateAlternate = {
+  layoutId?: string | null;
+  renderTemplateId?: string | null;
+  templateJson?: CanvasLayoutTemplate | null;
 };
 
 type CanvasLayoutBox = {
@@ -811,6 +821,38 @@ function customCanvasTemplate(options: RenderOptions): CanvasLayoutTemplate | nu
   return template;
 }
 
+function layoutNumberForId(layoutId: string | null | undefined) {
+  const match = layoutId?.toLowerCase().match(/layout[-_\s]*(\d+)/);
+  return match ? Number.parseInt(match[1] ?? "0", 10) : null;
+}
+
+function renderOptionsForScreenshotOrientation(
+  options: RenderOptions,
+  screenshotDimensions: MediaDimensions,
+): RenderOptions {
+  const layoutNumber = layoutNumberForId(options.layoutTemplateId);
+
+  if (layoutNumber !== 2 && layoutNumber !== 3) {
+    return options;
+  }
+
+  const alternate =
+    screenshotDimensions.height > screenshotDimensions.width
+      ? options.layoutTemplateAlternates?.portrait
+      : options.layoutTemplateAlternates?.landscape;
+
+  if (!alternate?.templateJson) {
+    return options;
+  }
+
+  return {
+    ...options,
+    layoutTemplate: alternate.renderTemplateId ?? options.layoutTemplate,
+    layoutTemplateId: alternate.layoutId ?? options.layoutTemplateId,
+    layoutTemplateJson: alternate.templateJson,
+  };
+}
+
 function customElementBox(
   template: CanvasLayoutTemplate | null,
   key: "hook" | "cover" | "screenshot" | "metadataLine" | "keywords",
@@ -1001,7 +1043,17 @@ export async function renderJob(jobId: string) {
     throw new Error("Render job not found.");
   }
 
-  const renderOptions = parseRenderOptions(job.render_options_json);
+  const sourceRenderOptions = parseRenderOptions(job.render_options_json);
+  const preparedScreenshot = await prepareScreenshotForRender({
+    campaignId: job.campaign_id,
+    jobId: job.id,
+    screenshotFilepath: job.screenshot_filepath,
+  });
+  const screenshotDimensions = await getMediaDimensions(preparedScreenshot.filepath);
+  const renderOptions = renderOptionsForScreenshotOrientation(
+    sourceRenderOptions,
+    screenshotDimensions,
+  );
   const layoutTemplate = renderOptions.layoutTemplate ?? "booktok_text_screenshot";
   const customTemplate = customCanvasTemplate(renderOptions);
   const customHookBox = customElementBox(customTemplate, "hook");
@@ -1022,6 +1074,9 @@ export async function renderJob(jobId: string) {
   const audioDuration = job.audio_filepath
     ? await getMediaDurationSeconds(job.audio_filepath).catch(() => null)
     : null;
+  const backgroundDuration = await getMediaDurationSeconds(job.background_filepath).catch(
+    () => null,
+  );
   const audioStartOffset = Math.max(0, job.audio_start_offset_seconds ?? 0);
   const availableAudioDuration =
     audioDuration === null ? null : Math.max(0.5, audioDuration - audioStartOffset);
@@ -1037,6 +1092,22 @@ export async function renderJob(jobId: string) {
     availableAudioDuration === null
       ? requestedRenderDuration
       : Math.min(requestedRenderDuration, availableAudioDuration);
+
+  if (backgroundDuration !== null) {
+    if (backgroundDuration < renderDuration + 0.25) {
+      throw new Error(
+        `Background video is too short for render without looping. Required ${renderDuration.toFixed(2)}s, available ${backgroundDuration.toFixed(2)}s.`,
+      );
+    }
+
+    const requestedBackgroundStart = Math.max(0, renderOptions.backgroundStartTime ?? 0);
+    const latestBackgroundStart = Math.max(0, backgroundDuration - renderDuration - 0.1);
+    renderOptions.backgroundStartTime = Math.min(
+      requestedBackgroundStart,
+      latestBackgroundStart,
+    );
+    renderOptions.backgroundEndTime = renderOptions.backgroundStartTime + renderDuration;
+  }
 
   if (
     isFullBackgroundMultiHook &&
@@ -1087,13 +1158,6 @@ export async function renderJob(jobId: string) {
     jobId: job.id,
     renderOptions,
   });
-  const preparedScreenshot = await prepareScreenshotForRender({
-    campaignId: job.campaign_id,
-    jobId: job.id,
-    screenshotFilepath: job.screenshot_filepath,
-  });
-
-  const screenshotDimensions = await getMediaDimensions(preparedScreenshot.filepath);
   const footerHeight =
     (postCopyOverlays.metadataOverlay?.height ?? 0) +
     (postCopyOverlays.keywordsOverlay?.height ?? 0) +
@@ -1116,11 +1180,7 @@ export async function renderJob(jobId: string) {
         })
     : null;
 
-  const args = [
-    "-y",
-    "-stream_loop",
-    "-1",
-  ];
+  const args = ["-y"];
 
   if (
     typeof renderOptions.backgroundStartTime === "number" &&
