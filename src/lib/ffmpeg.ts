@@ -740,7 +740,7 @@ async function createPostCopyOverlays({
         height: customMetadataBox?.height ?? (metadataLine.length > 44 ? (isCoverLayout ? 82 : 96) : (isCoverLayout ? 46 : 54)),
         fontSize: metadataFit?.fontSize ?? (isCoverLayout ? 28 : 34),
         fontCandidates: copyFontCandidates(),
-        fontWeight: 400,
+        fontWeight: 600,
         shadowPreset: "copy",
       })
     : null;
@@ -755,7 +755,7 @@ async function createPostCopyOverlays({
         height: customKeywordsBox?.height ?? (keywordText.includes("\n") ? (isCoverLayout ? 90 : 110) : (isCoverLayout ? 48 : 58)),
         fontSize: keywordFit?.fontSize ?? (isCoverLayout ? 24 : 30),
         fontCandidates: copyFontCandidates(),
-        fontWeight: 400,
+        fontWeight: 600,
         shadowPreset: "copy",
       })
     : null;
@@ -902,9 +902,9 @@ function hookFontCandidates() {
 
 function copyFontCandidates() {
   return [
-    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Regular.ttf"),
-    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Medium.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Semibold.ttf"),
+    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Medium.ttf"),
+    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Regular.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Bold.ttf"),
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",

@@ -49,10 +49,10 @@ const strokeWidth =
   Number.isFinite(Number(config.strokeWidth)) && Number(config.strokeWidth) >= 0
     ? Number(config.strokeWidth)
     : config.shadowPreset === "copy"
-      ? 2
+      ? 3
       : config.shadowPreset === "reduced"
-        ? 3
-        : 4;
+        ? 4
+        : 5;
 const textShadow =
   config.shadowPreset === "copy"
     ? copyTextShadow
