@@ -1178,12 +1178,21 @@ async function prepareLocalRenderJob(input: {
     directory: path.join(paths.backgroundsDirectory, input.localBookId),
     fallbackFilename: `${input.video.backgroundAssetId}.mp4`,
   });
-  const thumbnailFile = input.video.assets.thumbnail?.driveFileId
+  const thumbnailAsset = input.video.assets.thumbnail ?? null;
+  const thumbnailSourceUrl = thumbnailAsset
+    ? resolveSourceUrl(thumbnailAsset.renderSourceUrl) ??
+      resolveSourceUrl(thumbnailAsset.previewUrl) ??
+      resolveSourceUrl(thumbnailAsset.driveUrl)
+    : null;
+  const thumbnailFile = thumbnailAsset?.driveFileId || thumbnailSourceUrl
     ? await ensureSourceFileDownloaded({
-        driveFileId: input.video.assets.thumbnail.driveFileId,
-        filename: input.video.assets.thumbnail.filename,
+        driveFileId: thumbnailSourceUrl ? null : thumbnailAsset?.driveFileId,
+        sourceUrl: thumbnailSourceUrl,
+        filename: thumbnailSourceUrl
+          ? `${input.video.thumbnailAssetId ?? "thumbnail"}.jpg`
+          : thumbnailAsset?.filename,
         directory: path.join(paths.thumbnailsDirectory, input.localBookId),
-        fallbackFilename: `${input.video.thumbnailAssetId}.jpg`,
+        fallbackFilename: `${input.video.thumbnailAssetId ?? "thumbnail"}.jpg`,
       })
     : null;
   const audioAsset = input.video.assets.audio ?? null;
