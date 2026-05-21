@@ -26,9 +26,11 @@ async function getHookFont(fontCandidates) {
 }
 
 const hookTextShadow =
-  "2.5px 0 0 rgba(0,0,0,0.96), -2.5px 0 0 rgba(0,0,0,0.96), 0 2.5px 0 rgba(0,0,0,0.96), 0 -2.5px 0 rgba(0,0,0,0.96), 1.8px 1.8px 0 rgba(0,0,0,0.92), -1.8px 1.8px 0 rgba(0,0,0,0.92), 1.8px -1.8px 0 rgba(0,0,0,0.92), -1.8px -1.8px 0 rgba(0,0,0,0.92), 0 0 9px rgba(0,0,0,0.72), 0 0 18px rgba(0,0,0,0.44)";
+  "3.5px 0 0 rgba(0,0,0,0.96), -3.5px 0 0 rgba(0,0,0,0.96), 0 3.5px 0 rgba(0,0,0,0.96), 0 -3.5px 0 rgba(0,0,0,0.96), 2.5px 2.5px 0 rgba(0,0,0,0.92), -2.5px 2.5px 0 rgba(0,0,0,0.92), 2.5px -2.5px 0 rgba(0,0,0,0.92), -2.5px -2.5px 0 rgba(0,0,0,0.92), 0 2px 8px rgba(0,0,0,0.28)";
 const reducedTextShadow =
-  "2.5px 0 0 rgba(0,0,0,0.96), -2.5px 0 0 rgba(0,0,0,0.96), 0 2.5px 0 rgba(0,0,0,0.96), 0 -2.5px 0 rgba(0,0,0,0.96), 1.5px 1.5px 0 rgba(0,0,0,0.88), -1.5px 1.5px 0 rgba(0,0,0,0.88), 1.5px -1.5px 0 rgba(0,0,0,0.88), -1.5px -1.5px 0 rgba(0,0,0,0.88), 0 0 5px rgba(0,0,0,0.38), 0 0 10px rgba(0,0,0,0.2)";
+  "3px 0 0 rgba(0,0,0,0.95), -3px 0 0 rgba(0,0,0,0.95), 0 3px 0 rgba(0,0,0,0.95), 0 -3px 0 rgba(0,0,0,0.95), 2px 2px 0 rgba(0,0,0,0.9), -2px 2px 0 rgba(0,0,0,0.9), 2px -2px 0 rgba(0,0,0,0.9), -2px -2px 0 rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.22)";
+const subtleTextShadow =
+  "3.25px 0 0 rgba(0,0,0,0.96), -3.25px 0 0 rgba(0,0,0,0.96), 0 3.25px 0 rgba(0,0,0,0.96), 0 -3.25px 0 rgba(0,0,0,0.96), 2.25px 2.25px 0 rgba(0,0,0,0.92), -2.25px 2.25px 0 rgba(0,0,0,0.92), 2.25px -2.25px 0 rgba(0,0,0,0.92), -2.25px -2.25px 0 rgba(0,0,0,0.92), 0 2px 7px rgba(0,0,0,0.2)";
 
 const configPath = process.argv[2];
 
@@ -41,7 +43,11 @@ const hookFont = await getHookFont(config.fontCandidates ?? []);
 const fontFamily = hookFont?.name ?? "sans-serif";
 const fontWeight = Number(config.fontWeight ?? 600);
 const textShadow =
-  config.shadowPreset === "reduced" ? reducedTextShadow : hookTextShadow;
+  config.shadowPreset === "subtle"
+    ? subtleTextShadow
+    : config.shadowPreset === "reduced"
+      ? reducedTextShadow
+      : hookTextShadow;
 const imageStream = await unstable_createNodejsStream(
   React.createElement(
     "div",

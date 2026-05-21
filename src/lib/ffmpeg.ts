@@ -613,7 +613,28 @@ function wrapText(text: string, maxLineLength: number) {
     lines.push(currentLine);
   }
 
-  return lines.join("\n");
+  return balanceWrappedLines(lines, maxLineLength).join("\n");
+}
+
+function balanceWrappedLines(lines: string[], maxLineLength: number) {
+  const balanced = [...lines];
+
+  for (let index = balanced.length - 1; index > 0; index -= 1) {
+    const currentWords = balanced[index]?.split(" ").filter(Boolean) ?? [];
+    const previousWords = balanced[index - 1]?.split(" ").filter(Boolean) ?? [];
+
+    if (currentWords.length > 1 || previousWords.length <= 1) {
+      continue;
+    }
+
+    const combined = [...previousWords.slice(-1), ...currentWords].join(" ");
+    if (combined.length <= maxLineLength) {
+      balanced[index - 1] = previousWords.slice(0, -1).join(" ");
+      balanced[index] = combined;
+    }
+  }
+
+  return balanced.filter(Boolean);
 }
 
 async function createTextOverlayImage({
@@ -633,7 +654,7 @@ async function createTextOverlayImage({
   width: number;
   height: number;
   fontSize: number;
-  shadowPreset?: "default" | "reduced";
+  shadowPreset?: "default" | "reduced" | "subtle";
 }) {
   const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
   const overlayFilepath = path.join(tempDirectory, `${jobId}-${suffix}.png`);
@@ -648,7 +669,7 @@ async function createTextOverlayImage({
       fontWeight: 600,
       height,
       outputFilepath: overlayFilepath,
-      shadowPreset,
+      shadowPreset: "subtle",
       text,
       width,
     }),
@@ -828,7 +849,7 @@ function fitMediaIntoBox(
 }
 
 function charsPerLine(width: number, fontSize: number) {
-  return Math.max(8, Math.floor(width / (fontSize * 0.52)));
+  return Math.max(8, Math.floor(width / (fontSize * 0.48)));
 }
 
 function fitTextForBox(
@@ -931,9 +952,8 @@ async function createHookOverlayImage(
           : 260;
   const overlayWidth = customBox?.width ?? 820;
   const overlayHeight = customBox?.height ?? defaultOverlayHeight;
-  const fit = customBox
-    ? fitTextForBox(normalizedHook, customBox, defaultFontSize, 18)
-    : { fontSize: defaultFontSize, text: normalizedHook };
+  const fitBox = customBox ?? { width: overlayWidth, height: overlayHeight };
+  const fit = fitTextForBox(normalizedHook, fitBox, defaultFontSize, 18);
 
   await fs.writeFile(
     overlayConfigFilepath,
@@ -943,7 +963,7 @@ async function createHookOverlayImage(
       fontWeight: 600,
       height: overlayHeight,
       outputFilepath: overlayFilepath,
-      shadowPreset: isCoverLayout ? "reduced" : "default",
+      shadowPreset: "subtle",
       text: fit.text,
       width: overlayWidth,
     }),
