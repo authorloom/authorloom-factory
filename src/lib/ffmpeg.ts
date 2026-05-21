@@ -12,7 +12,6 @@ import { paths } from "@/lib/paths";
 
 const minRenderDurationSeconds = 6;
 const maxRenderDurationSeconds = 8;
-const thumbnailIntroDurationSeconds = 0.01;
 
 const canvasWidth = 1080;
 const canvasHeight = 1920;
@@ -884,22 +883,6 @@ function fitTextForBox(
   };
 }
 
-function buildThumbnailIntroFilterComplex({
-  mainFilterComplex,
-  thumbnailInputIndex,
-  introDurationSeconds,
-}: {
-  mainFilterComplex: string;
-  thumbnailInputIndex: number;
-  introDurationSeconds: string;
-}) {
-  return [
-    mainFilterComplex,
-    `[${thumbnailInputIndex}:v]scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight},setsar=1[thumbv]`,
-    `[mainv][thumbv]overlay=x=0:y=0:enable='between(t,0,${introDurationSeconds})'[vout]`,
-  ].join(";");
-}
-
 function hookFontCandidates() {
   return [
     path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Semibold.ttf"),
@@ -1065,9 +1048,7 @@ export async function renderJob(jobId: string) {
 
   const hasThumbnailFile = await fileExists(job.thumbnail_filepath);
   const hasCoverOverlay = (isCoverLayout || Boolean(customCoverBox)) && hasThumbnailFile;
-  const hasThumbnailIntro = hasThumbnailFile && !hasCoverOverlay;
   const renderDurationSeconds = String(renderDuration);
-  const thumbnailIntroDuration = String(thumbnailIntroDurationSeconds);
 
   const outputFilename = `${job.id}.mp4`;
   const outputDirectory = path.join(paths.rendersDirectory, job.campaign_id);
@@ -1195,10 +1176,9 @@ export async function renderJob(jobId: string) {
     nextInputIndex += 1;
   }
 
-  const thumbnailInputIndex = hasThumbnailIntro ? nextInputIndex : null;
   const coverInputIndex = hasCoverOverlay ? nextInputIndex : null;
 
-  if ((hasThumbnailIntro || hasCoverOverlay) && job.thumbnail_filepath) {
+  if (hasCoverOverlay && job.thumbnail_filepath) {
     args.push(
       "-loop",
       "1",
@@ -1251,17 +1231,10 @@ export async function renderJob(jobId: string) {
             height: postCopyOverlays.keywordsOverlay.height,
           }
         : null,
-    outputLabel: hasThumbnailIntro ? "mainv" : "vout",
+    outputLabel: "vout",
   });
 
-  const filterComplex =
-    hasThumbnailIntro && thumbnailInputIndex !== null
-      ? buildThumbnailIntroFilterComplex({
-          mainFilterComplex,
-          thumbnailInputIndex,
-          introDurationSeconds: thumbnailIntroDuration,
-        })
-      : mainFilterComplex;
+  const filterComplex = mainFilterComplex;
 
   args.push(
     "-filter_complex",
@@ -1300,12 +1273,10 @@ export async function renderJob(jobId: string) {
       originalScreenshot: job.screenshot_filepath,
       screenshotDimensions,
       audio: job.audio_filepath,
-      thumbnail: hasThumbnailIntro ? job.thumbnail_filepath : null,
+      thumbnail: null,
       output: outputFilepath,
       renderDurationSeconds,
-      thumbnailIntroDuration: hasThumbnailIntro
-        ? thumbnailIntroDuration
-        : null,
+      thumbnailIntroDuration: null,
       hookOverlay,
       timedHookOverlays,
       layout,
