@@ -856,7 +856,9 @@ function fitMediaIntoBox(
 }
 
 function charsPerLine(width: number, fontSize: number) {
-  return Math.max(8, Math.floor(width / (fontSize * 0.48)));
+  // TikTok Sans plus stroke renders wider than a naive average character
+  // estimate. Keep this conservative so Satori never clips the final glyph.
+  return Math.max(8, Math.floor(width / (fontSize * 0.6)));
 }
 
 function fitTextForBox(
