@@ -494,7 +494,9 @@ function buildImageTextFilterComplex({
     const keywordsBox = customElementBox(customTemplate, "keywords");
 
     if (screenshotBox) {
-      const shot = fitMediaIntoBox(screenshotBox, screenshotDimensions);
+      const shot = fitMediaIntoBox(screenshotBox, screenshotDimensions, {
+        verticalAlign: "bottom",
+      });
       filters.push(
         `[1:v]scale=${shot.width}:-2:force_original_aspect_ratio=decrease,setsar=1[shot]`,
         `[${customCurrentLabel}][shot]overlay=x=${shot.x}:y=${shot.y}[withshot]`,
@@ -809,16 +811,19 @@ function customElementBox(
 function fitMediaIntoBox(
   box: { x: number; y: number; width: number; height: number },
   dimensions: { width: number; height: number },
+  options: { verticalAlign?: "center" | "bottom" } = {},
 ) {
   const scale = Math.min(box.width / dimensions.width, box.height / dimensions.height);
   const width = Math.max(1, Math.round(dimensions.width * scale));
   const height = Math.max(1, Math.round(dimensions.height * scale));
+  const verticalOffset =
+    options.verticalAlign === "bottom" ? box.height - height : (box.height - height) / 2;
 
   return {
     width,
     height,
     x: Math.round(box.x + (box.width - width) / 2),
-    y: Math.round(box.y + (box.height - height) / 2),
+    y: Math.round(box.y + verticalOffset),
   };
 }
 
