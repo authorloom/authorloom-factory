@@ -645,6 +645,8 @@ async function createTextOverlayImage({
   width,
   height,
   fontSize,
+  fontCandidates = copyFontCandidates(),
+  fontWeight = 400,
   shadowPreset,
 }: {
   campaignId: string;
@@ -654,7 +656,9 @@ async function createTextOverlayImage({
   width: number;
   height: number;
   fontSize: number;
-  shadowPreset?: "default" | "reduced" | "subtle";
+  fontCandidates?: string[];
+  fontWeight?: number;
+  shadowPreset?: "default" | "reduced" | "subtle" | "copy";
 }) {
   const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
   const overlayFilepath = path.join(tempDirectory, `${jobId}-${suffix}.png`);
@@ -664,12 +668,12 @@ async function createTextOverlayImage({
   await fs.writeFile(
     overlayConfigFilepath,
     JSON.stringify({
-      fontCandidates: hookFontCandidates(),
+      fontCandidates,
       fontSize: String(fontSize),
-      fontWeight: 600,
+      fontWeight,
       height,
       outputFilepath: overlayFilepath,
-      shadowPreset: "subtle",
+      shadowPreset,
       text,
       width,
     }),
@@ -736,7 +740,9 @@ async function createPostCopyOverlays({
         width: customMetadataBox?.width ?? 820,
         height: customMetadataBox?.height ?? (metadataLine.length > 44 ? (isCoverLayout ? 82 : 96) : (isCoverLayout ? 46 : 54)),
         fontSize: metadataFit?.fontSize ?? (isCoverLayout ? 28 : 34),
-        shadowPreset: isCoverLayout ? "reduced" : "default",
+        fontCandidates: copyFontCandidates(),
+        fontWeight: 400,
+        shadowPreset: "copy",
       })
     : null;
   const keywordText = keywords?.length ? wrapText(keywords.join(" • "), 54) : "";
@@ -749,7 +755,9 @@ async function createPostCopyOverlays({
         width: customKeywordsBox?.width ?? 860,
         height: customKeywordsBox?.height ?? (keywordText.includes("\n") ? (isCoverLayout ? 90 : 110) : (isCoverLayout ? 48 : 58)),
         fontSize: keywordFit?.fontSize ?? (isCoverLayout ? 24 : 30),
-        shadowPreset: isCoverLayout ? "reduced" : "default",
+        fontCandidates: copyFontCandidates(),
+        fontWeight: 400,
+        shadowPreset: "copy",
       })
     : null;
 
@@ -895,13 +903,25 @@ function buildThumbnailIntroFilterComplex({
 function hookFontCandidates() {
   return [
     path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Semibold.ttf"),
+    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Medium.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Bold.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "ProximaNova-Semibold.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "ProximaNova-SemiBold.ttf"),
-    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Semibold.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "TikTokSans-SemiBold.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "Aveny-T.ttf"),
     path.join(paths.projectRoot, "public", "fonts", "AvenyT.ttf"),
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+  ];
+}
+
+function copyFontCandidates() {
+  return [
+    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Regular.ttf"),
+    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Medium.ttf"),
+    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Semibold.ttf"),
+    path.join(paths.projectRoot, "public", "fonts", "TikTokSans-Bold.ttf"),
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     "/Library/Fonts/Arial Unicode.ttf",
   ];

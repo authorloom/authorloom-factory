@@ -26,11 +26,13 @@ async function getHookFont(fontCandidates) {
 }
 
 const hookTextShadow =
-  "3.5px 0 0 rgba(0,0,0,0.96), -3.5px 0 0 rgba(0,0,0,0.96), 0 3.5px 0 rgba(0,0,0,0.96), 0 -3.5px 0 rgba(0,0,0,0.96), 2.5px 2.5px 0 rgba(0,0,0,0.92), -2.5px 2.5px 0 rgba(0,0,0,0.92), 2.5px -2.5px 0 rgba(0,0,0,0.92), -2.5px -2.5px 0 rgba(0,0,0,0.92), 0 2px 8px rgba(0,0,0,0.28)";
+  "2.75px 0 0 rgba(0,0,0,0.98), -2.75px 0 0 rgba(0,0,0,0.98), 0 2.75px 0 rgba(0,0,0,0.98), 0 -2.75px 0 rgba(0,0,0,0.98), 2px 2px 0 rgba(0,0,0,0.94), -2px 2px 0 rgba(0,0,0,0.94), 2px -2px 0 rgba(0,0,0,0.94), -2px -2px 0 rgba(0,0,0,0.94), 0 1px 5px rgba(0,0,0,0.16)";
 const reducedTextShadow =
-  "3px 0 0 rgba(0,0,0,0.95), -3px 0 0 rgba(0,0,0,0.95), 0 3px 0 rgba(0,0,0,0.95), 0 -3px 0 rgba(0,0,0,0.95), 2px 2px 0 rgba(0,0,0,0.9), -2px 2px 0 rgba(0,0,0,0.9), 2px -2px 0 rgba(0,0,0,0.9), -2px -2px 0 rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.22)";
+  "2.25px 0 0 rgba(0,0,0,0.96), -2.25px 0 0 rgba(0,0,0,0.96), 0 2.25px 0 rgba(0,0,0,0.96), 0 -2.25px 0 rgba(0,0,0,0.96), 1.5px 1.5px 0 rgba(0,0,0,0.92), -1.5px 1.5px 0 rgba(0,0,0,0.92), 1.5px -1.5px 0 rgba(0,0,0,0.92), -1.5px -1.5px 0 rgba(0,0,0,0.92), 0 1px 4px rgba(0,0,0,0.14)";
 const subtleTextShadow =
-  "3.25px 0 0 rgba(0,0,0,0.96), -3.25px 0 0 rgba(0,0,0,0.96), 0 3.25px 0 rgba(0,0,0,0.96), 0 -3.25px 0 rgba(0,0,0,0.96), 2.25px 2.25px 0 rgba(0,0,0,0.92), -2.25px 2.25px 0 rgba(0,0,0,0.92), 2.25px -2.25px 0 rgba(0,0,0,0.92), -2.25px -2.25px 0 rgba(0,0,0,0.92), 0 2px 7px rgba(0,0,0,0.2)";
+  "2.5px 0 0 rgba(0,0,0,0.98), -2.5px 0 0 rgba(0,0,0,0.98), 0 2.5px 0 rgba(0,0,0,0.98), 0 -2.5px 0 rgba(0,0,0,0.98), 1.75px 1.75px 0 rgba(0,0,0,0.94), -1.75px 1.75px 0 rgba(0,0,0,0.94), 1.75px -1.75px 0 rgba(0,0,0,0.94), -1.75px -1.75px 0 rgba(0,0,0,0.94), 0 1px 4px rgba(0,0,0,0.14)";
+const copyTextShadow =
+  "1.25px 0 0 rgba(0,0,0,0.96), -1.25px 0 0 rgba(0,0,0,0.96), 0 1.25px 0 rgba(0,0,0,0.96), 0 -1.25px 0 rgba(0,0,0,0.96), 1px 1px 0 rgba(0,0,0,0.9), -1px 1px 0 rgba(0,0,0,0.9), 1px -1px 0 rgba(0,0,0,0.9), -1px -1px 0 rgba(0,0,0,0.9), 0 1px 3px rgba(0,0,0,0.12)";
 
 const configPath = process.argv[2];
 
@@ -44,13 +46,15 @@ const fontFamily = hookFont?.name ?? "sans-serif";
 const fontWeight = Number(config.fontWeight ?? 600);
 const fontSize = Number(config.fontSize);
 const textShadow =
-  config.shadowPreset === "subtle"
+  config.shadowPreset === "copy"
+    ? copyTextShadow
+    : config.shadowPreset === "subtle"
     ? subtleTextShadow
     : config.shadowPreset === "reduced"
       ? reducedTextShadow
       : hookTextShadow;
 
-const emojiShadow = "0 1px 4px rgba(0,0,0,0.22)";
+const emojiShadow = "0 1px 3px rgba(0,0,0,0.16)";
 const emojiPattern =
   /(\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?)*|\p{Emoji_Presentation})/gu;
 
