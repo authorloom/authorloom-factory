@@ -45,6 +45,14 @@ const hookFont = await getHookFont(config.fontCandidates ?? []);
 const fontFamily = hookFont?.name ?? "sans-serif";
 const fontWeight = Number(config.fontWeight ?? 600);
 const fontSize = Number(config.fontSize);
+const strokeWidth =
+  Number.isFinite(Number(config.strokeWidth)) && Number(config.strokeWidth) >= 0
+    ? Number(config.strokeWidth)
+    : config.shadowPreset === "copy"
+      ? 2
+      : config.shadowPreset === "reduced"
+        ? 3
+        : 4;
 const textShadow =
   config.shadowPreset === "copy"
     ? copyTextShadow
@@ -109,6 +117,9 @@ function renderLine(line, lineIndex) {
                   textShadow: emojiShadow,
                 }
               : {
+                  WebkitTextStrokeColor: "rgba(0,0,0,0.98)",
+                  WebkitTextStrokeWidth: strokeWidth,
+                  paintOrder: "stroke fill",
                   textShadow,
                 },
         },
