@@ -12,6 +12,10 @@ import { paths } from "@/lib/paths";
 
 const minRenderDurationSeconds = 6;
 const maxRenderDurationSeconds = 8;
+const ffmpegTimeoutMs = Math.max(
+  30_000,
+  Number(process.env.AUTHORLOOM_FFMPEG_TIMEOUT_MS ?? 180_000),
+);
 
 const canvasWidth = 1080;
 const canvasHeight = 1920;
@@ -120,7 +124,11 @@ async function runCommand(
   options: { all?: boolean } = {},
 ) {
   const { execa } = await import("execa");
-  return execa(file, args, options);
+  return execa(file, args, {
+    ...options,
+    timeout: ffmpegTimeoutMs,
+    killSignal: "SIGKILL",
+  });
 }
 
 function getRandomRenderDurationSeconds() {
