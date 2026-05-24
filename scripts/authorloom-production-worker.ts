@@ -411,10 +411,7 @@ function validateRenderInstruction(input: {
     video.assets?.screenshot?.renderSourceUrl ??
     video.assets?.screenshot?.previewUrl ??
     null;
-  const backgroundSourceUrl =
-    video.assets?.background?.renderSourceUrl ??
-    video.assets?.background?.previewUrl ??
-    null;
+  const backgroundSourceUrl = video.assets?.background?.renderSourceUrl ?? null;
 
   if (!video.assets?.screenshot?.driveFileId && !screenshotSourceUrl) {
     errors.push(
@@ -1185,9 +1182,9 @@ async function prepareLocalRenderJob(input: {
     directory: path.join(paths.screenshotsDirectory, input.localBookId),
     fallbackFilename: `${input.video.screenshotAssetId}.jpg`,
   });
-  const backgroundSourceUrl =
-    resolveSourceUrl(input.video.assets.background.renderSourceUrl) ??
-    resolveSourceUrl(input.video.assets.background.previewUrl);
+  const backgroundSourceUrl = resolveSourceUrl(
+    input.video.assets.background.renderSourceUrl,
+  );
   const backgroundFile = await ensureSourceFileDownloaded({
     driveFileId: backgroundSourceUrl
       ? null
