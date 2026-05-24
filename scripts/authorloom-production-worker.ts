@@ -407,11 +407,24 @@ function validateRenderInstruction(input: {
     errors.push(`${prefix}.backgroundAssetId is required.`);
   }
   if (!video.hookAssetId) errors.push(`${prefix}.hookAssetId is required.`);
-  if (!video.assets?.screenshot?.driveFileId) {
-    errors.push(`${prefix}.assets.screenshot.driveFileId is required.`);
+  const screenshotSourceUrl =
+    video.assets?.screenshot?.renderSourceUrl ??
+    video.assets?.screenshot?.previewUrl ??
+    null;
+  const backgroundSourceUrl =
+    video.assets?.background?.renderSourceUrl ??
+    video.assets?.background?.previewUrl ??
+    null;
+
+  if (!video.assets?.screenshot?.driveFileId && !screenshotSourceUrl) {
+    errors.push(
+      `${prefix}.assets.screenshot.driveFileId or assets.screenshot.renderSourceUrl is required.`,
+    );
   }
-  if (!video.assets?.background?.driveFileId) {
-    errors.push(`${prefix}.assets.background.driveFileId is required.`);
+  if (!video.assets?.background?.driveFileId && !backgroundSourceUrl) {
+    errors.push(
+      `${prefix}.assets.background.driveFileId or assets.background.renderSourceUrl is required.`,
+    );
   }
   if (!video.assets?.hook?.text?.trim()) {
     errors.push(`${prefix}.assets.hook.text is required.`);
@@ -1172,9 +1185,17 @@ async function prepareLocalRenderJob(input: {
     directory: path.join(paths.screenshotsDirectory, input.localBookId),
     fallbackFilename: `${input.video.screenshotAssetId}.jpg`,
   });
+  const backgroundSourceUrl =
+    resolveSourceUrl(input.video.assets.background.renderSourceUrl) ??
+    resolveSourceUrl(input.video.assets.background.previewUrl);
   const backgroundFile = await ensureSourceFileDownloaded({
-    driveFileId: input.video.assets.background.driveFileId,
-    filename: input.video.assets.background.filename,
+    driveFileId: backgroundSourceUrl
+      ? null
+      : input.video.assets.background.driveFileId,
+    sourceUrl: backgroundSourceUrl,
+    filename: backgroundSourceUrl
+      ? `${input.video.backgroundAssetId}${path.extname(input.video.assets.background.filename ?? "") || ".mp4"}`
+      : input.video.assets.background.filename,
     directory: path.join(paths.backgroundsDirectory, input.localBookId),
     fallbackFilename: `${input.video.backgroundAssetId}.mp4`,
   });
