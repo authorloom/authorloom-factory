@@ -1402,6 +1402,8 @@ export async function renderJob(jobId: string) {
     });
 
     return {
+      effectiveLayoutTemplate: renderOptions.layoutTemplate,
+      effectiveLayoutTemplateId: renderOptions.layoutTemplateId,
       outputFilename,
       outputFilepath,
     };

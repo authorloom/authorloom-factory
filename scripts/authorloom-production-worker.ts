@@ -1374,9 +1374,16 @@ async function processRenderCampaign(job: ClaimedJob) {
         throw new Error("Prepared render job could not be loaded.");
       }
 
+      let renderResult:
+        | {
+            effectiveLayoutTemplate?: string;
+            effectiveLayoutTemplateId?: string;
+          }
+        | null = null;
+
       if (video.forceRerender || (existing.status !== "done" && !existing.drive_url)) {
         console.log(`Render started for ${video.videoOutputId}.`);
-        await renderJob(video.videoOutputId);
+        renderResult = await renderJob(video.videoOutputId);
         console.log(`Render completed for ${video.videoOutputId}.`);
       } else {
         console.log(`Render already complete locally for ${video.videoOutputId}.`);
@@ -1412,6 +1419,8 @@ async function processRenderCampaign(job: ClaimedJob) {
         startedAt,
         finishedAt,
         metadata: {
+          effectiveLayoutTemplate: renderResult?.effectiveLayoutTemplate ?? null,
+          effectiveLayoutTemplateId: renderResult?.effectiveLayoutTemplateId ?? null,
           localRenderJobId: video.videoOutputId,
           localCampaignId: localCampaign.id,
           localBatchId: localBatch.id,
