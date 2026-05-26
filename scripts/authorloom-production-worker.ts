@@ -64,6 +64,7 @@ const scalerMaxInstances = Math.max(
   Number(process.env.AUTHORLOOM_SCALER_MAX_INSTANCES ?? 28),
 );
 const taskSecret = process.env.AUTHORLOOM_TASK_SECRET?.trim();
+let healthServer: http.Server | null = null;
 
 if (!convexUrl) {
   throw new Error(
@@ -1669,7 +1670,7 @@ function startHealthServer() {
     return;
   }
 
-  const server = http.createServer(async (request, response) => {
+  healthServer = http.createServer(async (request, response) => {
     if (request.url === "/healthz") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(
@@ -1744,7 +1745,7 @@ function startHealthServer() {
     response.end("Authorloom factory worker\n");
   });
 
-  server.listen(healthPort, "0.0.0.0", () => {
+  healthServer.listen(healthPort, "0.0.0.0", () => {
     console.log(`Worker health server listening on port ${healthPort}.`);
   });
 }
