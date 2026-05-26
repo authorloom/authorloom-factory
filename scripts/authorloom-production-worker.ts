@@ -586,7 +586,14 @@ function getPreviewObjectNameFromUrl(value: string | null | undefined) {
       return null;
     }
 
-    return decodeURIComponent(parsed.pathname.slice(markerIndex + marker.length));
+    const objectName = decodeURIComponent(parsed.pathname.slice(markerIndex + marker.length));
+    const bucketName = getPreviewBucketName();
+
+    if (bucketName && objectName.startsWith(`${bucketName}/`)) {
+      return null;
+    }
+
+    return objectName;
   } catch {
     return null;
   }
