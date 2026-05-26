@@ -844,14 +844,23 @@ function renderOptionsForScreenshotOrientation(
     return options;
   }
 
+  const orientation =
+    screenshotDimensions.height > screenshotDimensions.width ? "portrait" : "landscape";
   const alternate =
-    screenshotDimensions.height > screenshotDimensions.width
+    orientation === "portrait"
       ? options.layoutTemplateAlternates?.portrait
       : options.layoutTemplateAlternates?.landscape;
 
   if (!alternate?.templateJson) {
+    console.warn(
+      `No ${orientation} alternate found for ${options.layoutTemplateId}; using selected layout. Screenshot dimensions: ${screenshotDimensions.width}x${screenshotDimensions.height}.`,
+    );
     return options;
   }
+
+  console.log(
+    `Using ${orientation} layout alternate for ${options.layoutTemplateId}: ${alternate.layoutId}. Screenshot dimensions: ${screenshotDimensions.width}x${screenshotDimensions.height}.`,
+  );
 
   return {
     ...options,
