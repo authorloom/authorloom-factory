@@ -1228,9 +1228,9 @@ async function prepareLocalRenderJob(input: {
     : null;
   const audioAsset = input.video.assets.audio ?? null;
   const audioSourceUrl =
-    audioAsset?.audioUrl ??
-    audioAsset?.renderSourceUrl ??
-    audioAsset?.previewUrl ??
+    resolveSourceUrl(audioAsset?.audioUrl) ??
+    resolveSourceUrl(audioAsset?.renderSourceUrl) ??
+    resolveSourceUrl(audioAsset?.previewUrl) ??
     null;
   const audioFile = audioSourceUrl
     ? await ensureSourceFileDownloaded({
