@@ -1102,14 +1102,16 @@ export async function renderJob(jobId: string) {
       : Math.min(requestedRenderDuration, availableAudioDuration);
 
   if (backgroundDuration !== null) {
-    if (backgroundDuration < renderDuration + 0.25) {
+    const durationToleranceSeconds = 0.05;
+
+    if (backgroundDuration + durationToleranceSeconds < renderDuration) {
       throw new Error(
         `Background video is too short for render without looping. Required ${renderDuration.toFixed(2)}s, available ${backgroundDuration.toFixed(2)}s.`,
       );
     }
 
     const requestedBackgroundStart = Math.max(0, renderOptions.backgroundStartTime ?? 0);
-    const latestBackgroundStart = Math.max(0, backgroundDuration - renderDuration - 0.1);
+    const latestBackgroundStart = Math.max(0, backgroundDuration - renderDuration);
     renderOptions.backgroundStartTime = Math.min(
       requestedBackgroundStart,
       latestBackgroundStart,

@@ -19,15 +19,8 @@ import {
   listBooksByAuthor,
   listCampaigns,
   listRenderBatchesByCampaign,
-  updateCampaignDriveFolder,
 } from "../src/lib/db";
 import { renderJob } from "../src/lib/ffmpeg";
-import {
-  createCampaignDriveFolderForBook,
-  downloadDriveFile,
-  ensureCampaignDriveOutputFolders,
-  uploadRenderJobVideoToDrive,
-} from "../src/lib/google";
 import { env } from "../src/lib/env";
 import { getGoogleServiceAccountAuth } from "../src/lib/google-auth";
 import { paths } from "../src/lib/paths";
@@ -411,25 +404,32 @@ function validateRenderInstruction(input: {
     video.assets?.screenshot?.renderSourceUrl ??
     video.assets?.screenshot?.previewUrl ??
     null;
-  const backgroundSourceUrl = video.assets?.background?.renderSourceUrl ?? null;
+  const backgroundSourceUrl =
+    video.assets?.background?.renderSourceUrl ??
+    video.assets?.background?.previewUrl ??
+    null;
 
-  if (!video.assets?.screenshot?.driveFileId && !screenshotSourceUrl) {
+  if (!screenshotSourceUrl) {
     errors.push(
-      `${prefix}.assets.screenshot.driveFileId or assets.screenshot.renderSourceUrl is required.`,
+      `${prefix}.assets.screenshot.renderSourceUrl or previewUrl is required.`,
     );
   }
-  if (!video.assets?.background?.driveFileId && !backgroundSourceUrl) {
+  if (!backgroundSourceUrl) {
     errors.push(
-      `${prefix}.assets.background.driveFileId or assets.background.renderSourceUrl is required.`,
+      `${prefix}.assets.background.renderSourceUrl or previewUrl is required.`,
     );
   }
   if (!video.assets?.hook?.text?.trim()) {
     errors.push(`${prefix}.assets.hook.text is required.`);
   }
-  const audioSourceUrl = video.assets.audio?.audioUrl ?? video.assets.audio?.previewUrl ?? null;
-  if ((video.audioAssetId || video.audioTrackId) && !video.assets.audio?.driveFileId && !audioSourceUrl) {
+  const audioSourceUrl =
+    video.assets.audio?.audioUrl ??
+    video.assets.audio?.renderSourceUrl ??
+    video.assets.audio?.previewUrl ??
+    null;
+  if ((video.audioAssetId || video.audioTrackId) && !audioSourceUrl) {
     errors.push(
-      `${prefix}.assets.audio.driveFileId or assets.audio.previewUrl is required when an audio asset is set.`,
+      `${prefix}.assets.audio.renderSourceUrl, audioUrl, or previewUrl is required when an audio asset is set.`,
     );
   }
   if (!video.outputFilename?.trim()) {
@@ -508,10 +508,6 @@ function nonNegativeNumber(value: unknown) {
 function safeFilename(value: string | null | undefined, fallback: string) {
   const name = value?.trim() || fallback;
   return name.replace(/[/:\\?%*"<>|]/g, "-");
-}
-
-function isHeicFilename(value: string | null | undefined) {
-  return [".heic", ".heif"].includes(path.extname(value ?? "").toLowerCase());
 }
 
 function resolveSourceUrl(value: string | null | undefined) {
@@ -596,6 +592,41 @@ function getPreviewObjectNameFromUrl(value: string | null | undefined) {
   }
 }
 
+function getStorageObjectNameFromUrl(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const bucketName = getPreviewBucketName();
+
+  if (!bucketName) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value);
+
+    if (parsed.hostname === "storage.googleapis.com") {
+      const parts = parsed.pathname.split("/").filter(Boolean);
+
+      if (parts[0] === bucketName && parts.length > 1) {
+        return decodeURIComponent(parts.slice(1).join("/"));
+      }
+    }
+
+    if (
+      parsed.hostname === `${bucketName}.storage.googleapis.com` &&
+      parsed.pathname.length > 1
+    ) {
+      return decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
 async function downloadPreviewObjectFromStorage(
   objectName: string,
   filepath: string,
@@ -637,10 +668,9 @@ async function uploadRenderedPreviewToStorage(input: {
   const bucketName = getPreviewBucketName();
 
   if (!bucketName) {
-    console.warn(
-      "AUTHORLOOM_PREVIEW_BUCKET or GOOGLE_CLOUD_STORAGE_BUCKET is not configured; skipping render preview staging.",
+    throw new Error(
+      "AUTHORLOOM_PREVIEW_BUCKET or GOOGLE_CLOUD_STORAGE_BUCKET is not configured; rendered output cannot be staged to GCS.",
     );
-    return null;
   }
 
   const objectName = previewObjectName(
@@ -684,14 +714,13 @@ async function uploadRenderedPreviewToStorage(input: {
 }
 
 async function ensureSourceFileDownloaded(input: {
-  driveFileId?: string | null;
   sourceUrl?: string | null;
   filename?: string | null;
   directory: string;
   fallbackFilename: string;
 }) {
-  if (!input.driveFileId && !input.sourceUrl) {
-    throw new Error(`${input.fallbackFilename} is missing a Drive file ID or source URL.`);
+  if (!input.sourceUrl) {
+    throw new Error(`${input.fallbackFilename} is missing a GCS render source URL.`);
   }
 
   await fs.mkdir(input.directory, { recursive: true });
@@ -703,31 +732,28 @@ async function ensureSourceFileDownloaded(input: {
     console.log(`Source asset already cached: ${filepath}`);
     return filepath;
   } catch {
-    if (input.driveFileId) {
-      console.log(`Downloading source asset ${input.driveFileId} -> ${filepath}`);
-      await downloadDriveFile(input.driveFileId, filepath);
-    } else if (input.sourceUrl) {
-      console.log(`Downloading source asset ${input.sourceUrl} -> ${filepath}`);
-      const previewObjectName = getPreviewObjectNameFromUrl(input.sourceUrl);
+    console.log(`Downloading source asset ${input.sourceUrl} -> ${filepath}`);
+    const previewObjectName =
+      getPreviewObjectNameFromUrl(input.sourceUrl) ??
+      getStorageObjectNameFromUrl(input.sourceUrl);
 
-      if (previewObjectName) {
-        await downloadPreviewObjectFromStorage(previewObjectName, filepath);
-      } else {
-        const response = await fetch(input.sourceUrl, {
-          headers: sourceRequestHeaders(input.sourceUrl),
-        });
-        if (!response.ok) {
-          const body = await response.text().catch(() => "");
-          throw new Error(
-            `Could not download source asset from ${input.sourceUrl}: ${response.status} ${response.statusText} ${body.slice(
-              0,
-              300,
-            )}`,
-          );
-        }
-        const buffer = Buffer.from(await response.arrayBuffer());
-        await fs.writeFile(filepath, buffer);
+    if (previewObjectName) {
+      await downloadPreviewObjectFromStorage(previewObjectName, filepath);
+    } else {
+      const response = await fetch(input.sourceUrl, {
+        headers: sourceRequestHeaders(input.sourceUrl),
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(
+          `Could not download source asset from ${input.sourceUrl}: ${response.status} ${response.statusText} ${body.slice(
+            0,
+            300,
+          )}`,
+        );
       }
+      const buffer = Buffer.from(await response.arrayBuffer());
+      await fs.writeFile(filepath, buffer);
     }
     console.log(`Source asset downloaded: ${filepath}`);
     return filepath;
@@ -1163,18 +1189,10 @@ async function prepareLocalRenderJob(input: {
   localCampaignId: string;
   localBatchId: string;
 }) {
-  const screenshotRenderSourceUrl = resolveSourceUrl(
-    input.video.assets.screenshot.renderSourceUrl,
-  );
   const screenshotPreviewUrl =
-    screenshotRenderSourceUrl ??
-    (isHeicFilename(input.video.assets.screenshot.filename)
-      ? resolveSourceUrl(input.video.assets.screenshot.previewUrl)
-      : null);
+    resolveSourceUrl(input.video.assets.screenshot.renderSourceUrl) ??
+    resolveSourceUrl(input.video.assets.screenshot.previewUrl);
   const screenshotFile = await ensureSourceFileDownloaded({
-    driveFileId: screenshotPreviewUrl
-      ? null
-      : input.video.assets.screenshot.driveFileId,
     sourceUrl: screenshotPreviewUrl,
     filename: screenshotPreviewUrl
       ? `${input.video.screenshotAssetId}.jpg`
@@ -1182,13 +1200,10 @@ async function prepareLocalRenderJob(input: {
     directory: path.join(paths.screenshotsDirectory, input.localBookId),
     fallbackFilename: `${input.video.screenshotAssetId}.jpg`,
   });
-  const backgroundSourceUrl = resolveSourceUrl(
-    input.video.assets.background.renderSourceUrl,
-  );
+  const backgroundSourceUrl =
+    resolveSourceUrl(input.video.assets.background.renderSourceUrl) ??
+    resolveSourceUrl(input.video.assets.background.previewUrl);
   const backgroundFile = await ensureSourceFileDownloaded({
-    driveFileId: backgroundSourceUrl
-      ? null
-      : input.video.assets.background.driveFileId,
     sourceUrl: backgroundSourceUrl,
     filename: backgroundSourceUrl
       ? `${input.video.backgroundAssetId}${path.extname(input.video.assets.background.filename ?? "") || ".mp4"}`
@@ -1199,12 +1214,10 @@ async function prepareLocalRenderJob(input: {
   const thumbnailAsset = input.video.assets.thumbnail ?? null;
   const thumbnailSourceUrl = thumbnailAsset
     ? resolveSourceUrl(thumbnailAsset.renderSourceUrl) ??
-      resolveSourceUrl(thumbnailAsset.previewUrl) ??
-      resolveSourceUrl(thumbnailAsset.driveUrl)
+      resolveSourceUrl(thumbnailAsset.previewUrl)
     : null;
-  const thumbnailFile = thumbnailAsset?.driveFileId || thumbnailSourceUrl
+  const thumbnailFile = thumbnailSourceUrl
     ? await ensureSourceFileDownloaded({
-        driveFileId: thumbnailSourceUrl ? null : thumbnailAsset?.driveFileId,
         sourceUrl: thumbnailSourceUrl,
         filename: thumbnailSourceUrl
           ? `${input.video.thumbnailAssetId ?? "thumbnail"}.jpg`
@@ -1214,10 +1227,13 @@ async function prepareLocalRenderJob(input: {
       })
     : null;
   const audioAsset = input.video.assets.audio ?? null;
-  const audioSourceUrl = audioAsset?.audioUrl ?? audioAsset?.previewUrl ?? null;
-  const audioFile = audioAsset?.driveFileId || audioSourceUrl
+  const audioSourceUrl =
+    audioAsset?.audioUrl ??
+    audioAsset?.renderSourceUrl ??
+    audioAsset?.previewUrl ??
+    null;
+  const audioFile = audioSourceUrl
     ? await ensureSourceFileDownloaded({
-        driveFileId: audioAsset?.driveFileId,
         sourceUrl: audioSourceUrl,
         filename: audioAsset?.filename,
         directory: path.join(paths.audioDirectory, "authorloom"),
@@ -1266,28 +1282,6 @@ async function prepareLocalRenderJob(input: {
     audioId,
     thumbnailId,
   });
-}
-
-async function ensureLocalDriveOutputFolders(input: {
-  localBookId: string;
-  localCampaignId: string;
-  campaignSlug: string;
-}) {
-  const campaign = getCampaign(input.localCampaignId);
-
-  if (!campaign?.drive_campaign_folder_id) {
-    const folder = await createCampaignDriveFolderForBook({
-      bookId: input.localBookId,
-      slug: input.campaignSlug,
-    });
-    updateCampaignDriveFolder({
-      campaignId: input.localCampaignId,
-      driveCampaignFolderId: folder.folderId,
-      driveCampaignFolderUrl: folder.folderUrl,
-    });
-  }
-
-  await ensureCampaignDriveOutputFolders(input.localCampaignId);
 }
 
 async function processRenderCampaign(job: ClaimedJob) {
@@ -1348,15 +1342,6 @@ async function processRenderCampaign(job: ClaimedJob) {
   const localBook = ensureLocalBook(input, localAuthor.id);
   const localCampaign = ensureLocalCampaign(input, localBook.id);
   const localBatch = ensureLocalBatch(localCampaign.id, input);
-  const campaignSlug =
-    input.campaign?.slug?.trim() ||
-    (input.campaignId ? slugifyCampaignName(input.campaignId) : localCampaign.slug ?? localCampaign.id);
-
-  await ensureLocalDriveOutputFolders({
-    localBookId: localBook.id,
-    localCampaignId: localCampaign.id,
-    campaignSlug,
-  });
 
   const results = [];
   const errors: string[] = [];
@@ -1390,42 +1375,19 @@ async function processRenderCampaign(job: ClaimedJob) {
       }
 
       const renderedJob = getRenderJobDetails(video.videoOutputId);
-      const stagedPreview =
-        renderedJob?.output_filepath
-          ? await uploadRenderedPreviewToStorage({
-              filepath: renderedJob.output_filepath,
-              campaignId: job.campaign?.id ?? input.campaignId ?? null,
-              videoOutputId: video.videoOutputId,
-              outputFilename: video.outputFilename ?? renderedJob.output_filename,
-            }).catch((error) => {
-              const message =
-                error instanceof Error ? error.message : "Unknown preview staging error.";
-              console.warn(
-                `Preview staging failed for ${video.videoOutputId}; continuing with Drive upload. ${message}`,
-              );
-              return null;
-            })
-          : null;
-
-      if (stagedPreview) {
-        console.log(
-          `Staged rendered preview for ${video.videoOutputId}: ${stagedPreview.previewUrl}.`,
-        );
+      if (!renderedJob?.output_filepath) {
+        throw new Error("Render completed but no local output file was recorded.");
       }
 
-      console.log(`Uploading rendered video ${video.videoOutputId} to Drive.`);
-      const upload = await uploadRenderJobVideoToDrive(video.videoOutputId);
-      const uploadedVideo =
-        upload.videos.find((item) => item.jobId === video.videoOutputId) ??
-        null;
-
-      if (!uploadedVideo?.driveUrl) {
-        throw new Error(
-          upload.errors.length > 0
-            ? `Drive upload did not return a video URL. ${upload.errors.join(" ")}`
-            : "Drive upload did not return a video URL.",
-        );
-      }
+      const stagedPreview = await uploadRenderedPreviewToStorage({
+        filepath: renderedJob.output_filepath,
+        campaignId: job.campaign?.id ?? input.campaignId ?? null,
+        videoOutputId: video.videoOutputId,
+        outputFilename: video.outputFilename ?? renderedJob.output_filename,
+      });
+      console.log(
+        `Staged rendered output for ${video.videoOutputId}: ${stagedPreview.previewUrl}.`,
+      );
 
       const finishedAt = new Date().toISOString();
 
@@ -1433,11 +1395,11 @@ async function processRenderCampaign(job: ClaimedJob) {
         videoOutputId: video.videoOutputId,
         fingerprint: video.fingerprint,
         status: "done" as const,
-        driveFileId: uploadedVideo.driveFileId ?? null,
-        driveUrl: uploadedVideo.driveUrl,
-        stagedPreviewObjectName: stagedPreview?.objectName ?? null,
-        stagedPreviewUrl: stagedPreview?.previewUrl ?? null,
-        outputFilename: uploadedVideo.outputFilename ?? null,
+        driveFileId: null,
+        driveUrl: null,
+        stagedPreviewObjectName: stagedPreview.objectName,
+        stagedPreviewUrl: stagedPreview.previewUrl,
+        outputFilename: video.outputFilename ?? renderedJob.output_filename ?? null,
         durationSeconds: null,
         startedAt,
         finishedAt,
@@ -1448,7 +1410,7 @@ async function processRenderCampaign(job: ClaimedJob) {
         },
       });
       console.log(
-        `Output written for ${video.videoOutputId}: ${uploadedVideo.driveUrl}.`,
+        `Output written to GCS for ${video.videoOutputId}: ${stagedPreview.previewUrl}.`,
       );
     } catch (error) {
       const message =
