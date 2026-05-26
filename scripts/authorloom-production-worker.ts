@@ -1756,6 +1756,9 @@ async function main() {
 
   if (taskOnlyMode) {
     console.log("Cloud Tasks mode enabled; background polling is disabled.");
+    setInterval(() => {
+      lastTickAt = new Date().toISOString();
+    }, 60_000);
     await new Promise(() => {
       // Keep the Cloud Run HTTP server alive for Cloud Tasks requests.
     });
