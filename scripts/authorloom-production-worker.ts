@@ -1756,7 +1756,9 @@ async function main() {
 
   if (taskOnlyMode) {
     console.log("Cloud Tasks mode enabled; background polling is disabled.");
-    return;
+    await new Promise(() => {
+      // Keep the Cloud Run HTTP server alive for Cloud Tasks requests.
+    });
   }
 
   do {
