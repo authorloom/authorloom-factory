@@ -840,7 +840,7 @@ function renderOptionsForScreenshotOrientation(
 ): RenderOptions {
   const layoutNumber = layoutNumberForId(options.layoutTemplateId);
 
-  if (layoutNumber !== 2 && layoutNumber !== 3) {
+  if (layoutNumber !== 2 && layoutNumber !== 3 && layoutNumber !== 4) {
     return options;
   }
 
