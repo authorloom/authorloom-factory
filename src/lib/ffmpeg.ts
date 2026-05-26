@@ -14,7 +14,7 @@ const minRenderDurationSeconds = 6;
 const maxRenderDurationSeconds = 8;
 const ffmpegTimeoutMs = Math.max(
   30_000,
-  Number(process.env.AUTHORLOOM_FFMPEG_TIMEOUT_MS ?? 180_000),
+  Number(process.env.AUTHORLOOM_FFMPEG_TIMEOUT_MS ?? 420_000),
 );
 
 const canvasWidth = 1080;
