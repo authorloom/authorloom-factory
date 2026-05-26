@@ -535,7 +535,7 @@ function buildImageTextFilterComplex({
         height: coverOverlay.height,
       });
       filters.push(
-        `[${coverOverlay.inputIndex}:v]scale=${cover.width}:-2:force_original_aspect_ratio=decrease,setsar=1[cover]`,
+        `[${coverOverlay.inputIndex}:v]scale=w=${cover.width}:h=-2:force_original_aspect_ratio=decrease:flags=lanczos,setsar=1,format=rgba[cover]`,
         `[${customCurrentLabel}][cover]overlay=x=${cover.x}:y=${cover.y}[withcover]`,
       );
       customCurrentLabel = "withcover";
@@ -603,7 +603,7 @@ function buildImageTextFilterComplex({
     `[withshot][hook]overlay=x=(W-w)/2:y=${Math.round(nudgedHookY)}[withhook]`,
     ...(coverOverlay
       ? [
-          `[${coverOverlay.inputIndex}:v]scale=${coverWidth}:-2:force_original_aspect_ratio=decrease,setsar=1[cover]`,
+          `[${coverOverlay.inputIndex}:v]scale=w=${coverWidth}:h=-2:force_original_aspect_ratio=decrease:flags=lanczos,setsar=1,format=rgba[cover]`,
           `[withhook][cover]overlay=x=${coverX}:y=${Math.round(nudgedCoverY)}[withcover]`,
         ]
       : []),
