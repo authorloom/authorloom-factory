@@ -1211,6 +1211,8 @@ export async function renderJob(jobId: string) {
   args.push(
     "-i",
     job.background_filepath,
+    "-loop",
+    "1",
     "-i",
     preparedScreenshot.filepath,
   );
@@ -1220,7 +1222,7 @@ export async function renderJob(jobId: string) {
   const hookOverlayInputIndex = hookOverlay ? nextInputIndex : null;
 
   if (hookOverlay) {
-    args.push("-i", hookOverlay.filepath);
+    args.push("-loop", "1", "-i", hookOverlay.filepath);
     nextInputIndex += 1;
   }
 
@@ -1228,7 +1230,7 @@ export async function renderJob(jobId: string) {
 
   if (timedHookOverlays.length > 0) {
     timedHookOverlays.forEach((overlay, index) => {
-      args.push("-i", overlay.filepath);
+      args.push("-loop", "1", "-i", overlay.filepath);
       timedHookOverlayInputs.push({
         inputIndex: nextInputIndex,
         height: overlay.height,
@@ -1244,7 +1246,7 @@ export async function renderJob(jobId: string) {
     : null;
 
   if (postCopyOverlays.metadataOverlay) {
-    args.push("-i", postCopyOverlays.metadataOverlay.filepath);
+    args.push("-loop", "1", "-i", postCopyOverlays.metadataOverlay.filepath);
     nextInputIndex += 1;
   }
 
@@ -1253,7 +1255,7 @@ export async function renderJob(jobId: string) {
     : null;
 
   if (postCopyOverlays.keywordsOverlay) {
-    args.push("-i", postCopyOverlays.keywordsOverlay.filepath);
+    args.push("-loop", "1", "-i", postCopyOverlays.keywordsOverlay.filepath);
     nextInputIndex += 1;
   }
 
@@ -1379,6 +1381,19 @@ export async function renderJob(jobId: string) {
     console.log("FFmpeg args:", args.join(" "));
 
     await runCommand("ffmpeg", args, { all: true });
+
+    const [outputStat, outputDuration] = await Promise.all([
+      fs.stat(outputFilepath),
+      getMediaDurationSeconds(outputFilepath).catch(() => null),
+    ]);
+
+    if (outputStat.size < 1024 || outputDuration === null || outputDuration < 0.5) {
+      throw new Error(
+        `Rendered output is invalid. Size ${outputStat.size} bytes, duration ${
+          outputDuration === null ? "unknown" : `${outputDuration.toFixed(2)}s`
+        }.`,
+      );
+    }
 
     markRenderJobDone({
       jobId: job.id,
