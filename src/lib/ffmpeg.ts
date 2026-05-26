@@ -535,7 +535,7 @@ function buildImageTextFilterComplex({
         height: coverOverlay.height,
       });
       filters.push(
-        `[${coverOverlay.inputIndex}:v]scale=w=${cover.width}:h=-2:force_original_aspect_ratio=decrease:flags=lanczos,setsar=1,format=rgba[cover]`,
+        `[${coverOverlay.inputIndex}:v]scale=w=${cover.width}:h=-2:force_original_aspect_ratio=decrease:flags=lanczos:in_range=pc:out_range=pc,setsar=1,format=rgba[cover]`,
         `[${customCurrentLabel}][cover]overlay=x=${cover.x}:y=${cover.y}[withcover]`,
       );
       customCurrentLabel = "withcover";
@@ -603,7 +603,7 @@ function buildImageTextFilterComplex({
     `[withshot][hook]overlay=x=(W-w)/2:y=${Math.round(nudgedHookY)}[withhook]`,
     ...(coverOverlay
       ? [
-          `[${coverOverlay.inputIndex}:v]scale=w=${coverWidth}:h=-2:force_original_aspect_ratio=decrease:flags=lanczos,setsar=1,format=rgba[cover]`,
+          `[${coverOverlay.inputIndex}:v]scale=w=${coverWidth}:h=-2:force_original_aspect_ratio=decrease:flags=lanczos:in_range=pc:out_range=pc,setsar=1,format=rgba[cover]`,
           `[withhook][cover]overlay=x=${coverX}:y=${Math.round(nudgedCoverY)}[withcover]`,
         ]
       : []),
@@ -1341,6 +1341,12 @@ export async function renderJob(jobId: string) {
     "libx264",
     "-pix_fmt",
     "yuv420p",
+    "-colorspace",
+    "bt709",
+    "-color_primaries",
+    "bt709",
+    "-color_trc",
+    "bt709",
     "-movflags",
     "+faststart",
     outputFilepath,
