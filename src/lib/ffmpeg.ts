@@ -19,6 +19,12 @@ const ffmpegTimeoutMs = Math.max(
 
 const canvasWidth = 1080;
 const canvasHeight = 1920;
+const outputFps = 30;
+const outputVideoBitrate = "10M";
+const outputVideoMaxrate = "12M";
+const outputVideoBufsize = "20M";
+const outputAudioBitrate = "128k";
+const outputAudioSampleRate = "48000";
 
 // Organic Reels/TikTok safe area.
 const safeTop = 160;
@@ -1334,13 +1340,35 @@ export async function renderJob(jobId: string) {
       `${audioInputIndex}:a:0`,
       "-c:a",
       "aac",
+      "-b:a",
+      outputAudioBitrate,
+      "-ar",
+      outputAudioSampleRate,
+      "-ac",
+      "2",
       "-shortest",
     );
   }
 
   args.push(
+    "-r",
+    String(outputFps),
+    "-fps_mode",
+    "cfr",
     "-c:v",
     "libx264",
+    "-preset",
+    "medium",
+    "-profile:v",
+    "high",
+    "-level:v",
+    "4.1",
+    "-b:v",
+    outputVideoBitrate,
+    "-maxrate",
+    outputVideoMaxrate,
+    "-bufsize",
+    outputVideoBufsize,
     "-pix_fmt",
     "yuv420p",
     "-colorspace",
