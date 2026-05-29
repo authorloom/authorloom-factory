@@ -10,7 +10,7 @@ import {
 } from "@/lib/db";
 import { paths } from "@/lib/paths";
 
-const minRenderDurationSeconds = 6;
+const minRenderDurationSeconds = 5;
 const maxRenderDurationSeconds = 8;
 const ffmpegTimeoutMs = Math.max(
   30_000,
@@ -1115,6 +1115,7 @@ export async function renderJob(jobId: string) {
   const backgroundDuration = await getMediaDurationSeconds(job.background_filepath).catch(
     () => null,
   );
+  const playbackSpeed = clampNumber(renderOptions.playbackSpeed, 0.95, 1.05, 1);
   const audioStartOffset = Math.max(0, job.audio_start_offset_seconds ?? 0);
   const availableAudioDuration =
     audioDuration === null ? null : Math.max(0.5, audioDuration - audioStartOffset);
@@ -1126,36 +1127,46 @@ export async function renderJob(jobId: string) {
         maxRenderDurationSeconds,
         getRandomRenderDurationSeconds(),
       );
-  const renderDuration =
+  const audioLimitedRenderDuration =
     availableAudioDuration === null
       ? requestedRenderDuration
       : Math.min(requestedRenderDuration, availableAudioDuration);
+  let renderDuration = audioLimitedRenderDuration;
 
   if (backgroundDuration !== null) {
-    const durationToleranceSeconds = 0.05;
-
-    if (backgroundDuration + durationToleranceSeconds < renderDuration) {
-      throw new Error(
-        `Background video is too short for render without looping. Required ${renderDuration.toFixed(2)}s, available ${backgroundDuration.toFixed(2)}s.`,
-      );
-    }
-
     const requestedBackgroundStart = Math.max(0, renderOptions.backgroundStartTime ?? 0);
-    const latestBackgroundStart = Math.max(0, backgroundDuration - renderDuration);
+    const latestBackgroundStart = Math.max(
+      0,
+      backgroundDuration - renderDuration * playbackSpeed,
+    );
     renderOptions.backgroundStartTime = Math.min(
       requestedBackgroundStart,
       latestBackgroundStart,
     );
+    const availableInputDuration = Math.max(
+      0,
+      backgroundDuration - renderOptions.backgroundStartTime,
+    );
+    const requiredInputDuration = renderDuration * playbackSpeed;
+
+    if (availableInputDuration + 0.05 < requiredInputDuration) {
+      const availableRenderDuration =
+        Math.max(0, availableInputDuration - 0.01) / playbackSpeed;
+      renderDuration = Math.max(
+        minRenderDurationSeconds,
+        Math.min(renderDuration, availableRenderDuration),
+      );
+    }
     renderOptions.backgroundEndTime = renderOptions.backgroundStartTime + renderDuration;
   }
 
   if (
     isFullBackgroundMultiHook &&
     availableAudioDuration !== null &&
-    availableAudioDuration < requestedRenderDuration
+    availableAudioDuration < renderDuration
   ) {
     throw new Error(
-      `Audio segment is too short for timed multi-hook render. Required ${requestedRenderDuration}s, available ${availableAudioDuration.toFixed(2)}s after start offset.`,
+      `Audio segment is too short for timed multi-hook render. Required ${renderDuration.toFixed(2)}s, available ${availableAudioDuration.toFixed(2)}s after start offset.`,
     );
   }
 
