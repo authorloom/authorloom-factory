@@ -100,6 +100,21 @@ type RenderOptions = {
   } | null;
 };
 
+function renderOptionAdjustments(
+  options: Partial<RenderOptions> | null | undefined,
+) {
+  if (!options) return {};
+  const adjustments = { ...options };
+
+  delete adjustments.layoutTemplate;
+  delete adjustments.layoutTemplateId;
+  delete adjustments.layoutTemplateJson;
+  delete adjustments.layoutTemplateAlternates;
+  delete adjustments.variationParameters;
+  delete adjustments.proofAdjustments;
+  return adjustments;
+}
+
 type CanvasLayoutTemplateAlternate = {
   layoutId?: string | null;
   renderTemplateId?: string | null;
@@ -345,8 +360,8 @@ function buildImageTextFilterComplex({
 }) {
   const effectiveOptions = {
     ...(options ?? {}),
-    ...(options?.variationParameters ?? {}),
-    ...(options?.proofAdjustments ?? {}),
+    ...renderOptionAdjustments(options?.variationParameters),
+    ...renderOptionAdjustments(options?.proofAdjustments),
   };
   const playbackSpeed = clampNumber(effectiveOptions.playbackSpeed, 0.95, 1.05, 1);
   const zoomLevel = clampNumber(effectiveOptions.zoomLevel, 1, 1.08, 1);
