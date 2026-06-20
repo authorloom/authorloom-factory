@@ -1839,6 +1839,7 @@ export async function renderJob(jobId: string) {
   const backgroundDuration = await getMediaDurationSeconds(job.background_filepath).catch(
     () => null,
   );
+  const backgroundIsStillImage = isStillImageFile(job.background_filepath);
   const playbackSpeed = clampNumber(renderOptions.playbackSpeed, 0.95, 1.05, 1);
   const audioStartOffset = Math.max(0, job.audio_start_offset_seconds ?? 0);
   const availableAudioDuration =
@@ -1866,13 +1867,14 @@ export async function renderJob(jobId: string) {
   let studioMainStartSeconds = studioTemplate ? studioTimelineDurations.introDuration : 0;
   let studioMainDuration = studioTemplate ? studioTimelineDurations.mainDuration : renderDuration;
   let studioOutroDuration = studioTemplate ? studioTimelineDurations.outroDuration : 0;
+  let shouldLoopBackgroundVideo = false;
 
   if (backgroundDuration !== null) {
     const requestedBackgroundStart = Math.max(0, renderOptions.backgroundStartTime ?? 0);
-    const latestBackgroundStart = Math.max(
-      0,
-      backgroundDuration - renderDuration * playbackSpeed,
-    );
+    const requiredInputDuration = renderDuration * playbackSpeed;
+    const latestBackgroundStart = backgroundIsStillImage
+      ? requestedBackgroundStart
+      : Math.max(0, backgroundDuration - requiredInputDuration);
     renderOptions.backgroundStartTime = Math.min(
       requestedBackgroundStart,
       latestBackgroundStart,
@@ -1881,15 +1883,9 @@ export async function renderJob(jobId: string) {
       0,
       backgroundDuration - renderOptions.backgroundStartTime,
     );
-    const requiredInputDuration = renderDuration * playbackSpeed;
 
     if (availableInputDuration + 0.05 < requiredInputDuration) {
-      const availableRenderDuration =
-        Math.max(0, availableInputDuration - 0.01) / playbackSpeed;
-      renderDuration = Math.max(
-        minRenderDurationSeconds,
-        Math.min(renderDuration, availableRenderDuration),
-      );
+      shouldLoopBackgroundVideo = !backgroundIsStillImage;
     }
     renderOptions.backgroundEndTime = renderOptions.backgroundStartTime + renderDuration;
   }
@@ -1991,8 +1987,10 @@ export async function renderJob(jobId: string) {
     args.push("-ss", String(renderOptions.backgroundStartTime));
   }
 
-  if (isStillImageFile(job.background_filepath)) {
+  if (backgroundIsStillImage) {
     args.push("-loop", "1");
+  } else if (shouldLoopBackgroundVideo) {
+    args.push("-stream_loop", "-1");
   }
 
   args.push("-i", job.background_filepath);
