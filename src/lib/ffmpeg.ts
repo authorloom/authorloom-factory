@@ -19,6 +19,7 @@ const ffmpegTimeoutMs = Math.max(
 
 const canvasWidth = 1080;
 const canvasHeight = 1920;
+const layoutStudioTypographyScale = 2;
 const outputFps = 30;
 const outputVideoBitrate = "10M";
 const outputVideoMaxrate = "12M";
@@ -1270,11 +1271,26 @@ async function createLayoutStudioTextOverlay({
   jobId: string;
   text: string;
 }) {
-  const padding = clampNumber(element.padding, 0, Math.min(element.width, element.height) / 2, 0);
-  const textWrapPaddingX = element.textWrap ? element.textWrapPaddingX ?? 12 : 0;
-  const textWrapPaddingY = element.textWrap ? element.textWrapPaddingY ?? 6 : 0;
-  const desiredFontSize = clampNumber(element.fontSize, 8, 180, 42);
+  const padding = clampNumber(
+    (element.padding ?? 0) * layoutStudioTypographyScale,
+    0,
+    Math.min(element.width, element.height) / 2,
+    0,
+  );
+  const textWrapPaddingX = element.textWrap
+    ? (element.textWrapPaddingX ?? 12) * layoutStudioTypographyScale
+    : 0;
+  const textWrapPaddingY = element.textWrap
+    ? (element.textWrapPaddingY ?? 6) * layoutStudioTypographyScale
+    : 0;
+  const desiredFontSize = clampNumber(
+    (element.fontSize ?? 42) * layoutStudioTypographyScale,
+    8,
+    180,
+    42 * layoutStudioTypographyScale,
+  );
   const desiredLineHeight = clampNumber(element.lineHeight, 0.8, 2.5, 1.15);
+  const outlineWidth = (element.outlineWidth ?? 0) * layoutStudioTypographyScale;
   const lineHeight = element.textWrap
     ? Math.max(
         desiredLineHeight,
@@ -1292,7 +1308,7 @@ async function createLayoutStudioTextOverlay({
     maxHeight,
     maxWidth,
     minFontSize: 8,
-    outlineWidth: element.outlineWidth ?? 0,
+    outlineWidth,
     text,
     wrappedText: initialWrapped,
     desiredFontSize,
@@ -1318,21 +1334,21 @@ async function createLayoutStudioTextOverlay({
     style: {
       backgroundColor: alphaBackground(element.backgroundColor, element.backgroundOpacity),
       border: element.containerOutline
-        ? `${Math.max(0, element.borderWidth ?? 0)}px solid ${element.borderColor ?? "transparent"}`
+        ? `${Math.max(0, (element.borderWidth ?? 0) * layoutStudioTypographyScale)}px solid ${element.borderColor ?? "transparent"}`
         : undefined,
-      borderRadius: element.borderRadius ?? 0,
+      borderRadius: (element.borderRadius ?? 0) * layoutStudioTypographyScale,
       containerShadow: shadowCss(
         element.shadow && !element.textWrap,
         element.shadowColor,
-        element.shadowBlur,
-        element.shadowDistance,
+        (element.shadowBlur ?? 24) * layoutStudioTypographyScale,
+        (element.shadowDistance ?? 8) * layoutStudioTypographyScale,
       ),
       horizontalAlign: element.horizontalAlign ?? "center",
       italic: Boolean(element.italic),
       lineHeight: renderedLineHeight,
       outlineColor: element.outlineColor ?? "transparent",
       padding: `${padding}px`,
-      strokeWidth: element.outlineWidth ?? 0,
+      strokeWidth: outlineWidth,
       textAlign: element.horizontalAlign ?? "center",
       textColor: element.textColor ?? "#ffffff",
       textWrap: Boolean(element.textWrap),
@@ -1342,13 +1358,13 @@ async function createLayoutStudioTextOverlay({
       ),
       textWrapPaddingX,
       textWrapPaddingY,
-      textWrapRadius: element.textWrapRadius ?? 18,
+      textWrapRadius: (element.textWrapRadius ?? 18) * layoutStudioTypographyScale,
       verticalAlign: element.verticalAlign ?? "middle",
       wrapShadow: shadowCss(
         element.shadow && Boolean(element.textWrap),
         element.shadowColor,
-        element.shadowBlur,
-        element.shadowDistance,
+        (element.shadowBlur ?? 24) * layoutStudioTypographyScale,
+        (element.shadowDistance ?? 8) * layoutStudioTypographyScale,
       ),
     },
   });
