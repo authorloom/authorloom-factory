@@ -77,6 +77,12 @@ const lineJustifyContent =
       ? "flex-end"
       : "center";
 const textColor = config.textColor ?? "white";
+const contentWidth = Number.isFinite(Number(config.contentWidth))
+  ? Number(config.contentWidth)
+  : Number(config.width);
+const contentHeight = Number.isFinite(Number(config.contentHeight))
+  ? Number(config.contentHeight)
+  : Number(config.height);
 const strokeWidth =
   Number.isFinite(Number(config.strokeWidth)) && Number(config.strokeWidth) >= 0
     ? Number(config.strokeWidth)
@@ -195,29 +201,42 @@ const imageStream = await unstable_createNodejsStream(
     "div",
     {
       style: cleanStyle({
-        alignItems,
-        background: config.backgroundColor ?? "transparent",
-        border: config.border ? config.border : undefined,
-        borderRadius: Number(config.borderRadius ?? 0),
-        boxShadow: config.containerShadow,
-        color: textColor,
         display: "flex",
-        fontFamily,
-        flexDirection: "column",
-        fontSize,
-        fontWeight,
-        fontStyle,
+        alignItems: "center",
+        justifyContent: "center",
+        background: "transparent",
         height: Number(config.height),
-        justifyContent,
-        letterSpacing: "0",
-        lineHeight,
-        padding: config.padding ?? "0 12px",
-        textAlign,
         width: Number(config.width),
-        whiteSpace: "pre",
       }),
     },
-    renderedText,
+    React.createElement(
+      "div",
+      {
+        style: cleanStyle({
+          alignItems,
+          background: config.backgroundColor ?? "transparent",
+          border: config.border ? config.border : undefined,
+          borderRadius: Number(config.borderRadius ?? 0),
+          boxShadow: config.containerShadow,
+          color: textColor,
+          display: "flex",
+          fontFamily,
+          flexDirection: "column",
+          fontSize,
+          fontWeight,
+          fontStyle,
+          height: contentHeight,
+          justifyContent,
+          letterSpacing: "0",
+          lineHeight,
+          padding: config.padding ?? "0 12px",
+          textAlign,
+          width: contentWidth,
+          whiteSpace: "pre",
+        }),
+      },
+      renderedText,
+    ),
   ),
   {
     width: Number(config.width),
