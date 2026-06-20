@@ -132,6 +132,10 @@ type RenderInstruction = {
     background: RenderAssetRef;
     audio?: RenderAssetRef | null;
     thumbnail?: RenderAssetRef | null;
+    cta?: RenderAssetRef | null;
+    tropes?: RenderAssetRef[] | null;
+    intro?: RenderAssetRef | null;
+    outro?: RenderAssetRef | null;
   };
   renderOptions?: {
     durationSeconds?: number | null;
@@ -147,6 +151,7 @@ type RenderInstruction = {
     layoutTemplate?: string | null;
     layoutTemplateId?: string | null;
     layoutTemplateJson?: unknown;
+    layoutStudioAssets?: unknown;
     multiHookTexts?: string[] | null;
   };
   postCopy?: {
@@ -155,6 +160,8 @@ type RenderInstruction = {
     keywords?: string[];
     keywordOrder?: string[];
     keywordCategories?: string[];
+    ctaText?: string | null;
+    tropes?: string[];
     renderedBookTitleLine?: string | null;
     metadataTemplateId?: string | null;
   };
@@ -1234,6 +1241,36 @@ async function prepareLocalRenderJob(input: {
         fallbackFilename: `${input.video.thumbnailAssetId ?? "thumbnail"}.jpg`,
       })
     : null;
+  const introAsset = input.video.assets.intro ?? null;
+  const introSourceUrl = introAsset
+    ? resolveSourceUrl(introAsset.renderSourceUrl) ??
+      resolveSourceUrl(introAsset.previewUrl)
+    : null;
+  const introFile = introSourceUrl
+    ? await ensureSourceFileDownloaded({
+        sourceUrl: introSourceUrl,
+        filename: introSourceUrl
+          ? `${introAsset?.assetId ?? "intro"}${path.extname(introAsset?.filename ?? "") || ".jpg"}`
+          : introAsset?.filename,
+        directory: path.join(paths.thumbnailsDirectory, input.localBookId),
+        fallbackFilename: `${introAsset?.assetId ?? "intro"}.jpg`,
+      })
+    : null;
+  const outroAsset = input.video.assets.outro ?? null;
+  const outroSourceUrl = outroAsset
+    ? resolveSourceUrl(outroAsset.renderSourceUrl) ??
+      resolveSourceUrl(outroAsset.previewUrl)
+    : null;
+  const outroFile = outroSourceUrl
+    ? await ensureSourceFileDownloaded({
+        sourceUrl: outroSourceUrl,
+        filename: outroSourceUrl
+          ? `${outroAsset?.assetId ?? "outro"}${path.extname(outroAsset?.filename ?? "") || ".jpg"}`
+          : outroAsset?.filename,
+        directory: path.join(paths.thumbnailsDirectory, input.localBookId),
+        fallbackFilename: `${outroAsset?.assetId ?? "outro"}.jpg`,
+      })
+    : null;
   const audioAsset = input.video.assets.audio ?? null;
   const audioSourceUrl =
     resolveSourceUrl(audioAsset?.audioUrl) ??
@@ -1281,7 +1318,22 @@ async function prepareLocalRenderJob(input: {
   });
 
   upsertRenderJob({
-    video: input.video,
+    video: {
+      ...input.video,
+      renderOptions: {
+        ...(input.video.renderOptions ?? {}),
+        layoutStudioAssets: {
+          ...(
+            input.video.renderOptions?.layoutStudioAssets &&
+            typeof input.video.renderOptions.layoutStudioAssets === "object"
+              ? input.video.renderOptions.layoutStudioAssets as Record<string, unknown>
+              : {}
+          ),
+          introFilepath: introFile,
+          outroFilepath: outroFile,
+        },
+      },
+    },
     campaignId: input.localCampaignId,
     batchId: input.localBatchId,
     backgroundId,
