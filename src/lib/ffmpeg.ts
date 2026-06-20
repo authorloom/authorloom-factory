@@ -92,7 +92,9 @@ type RenderOptions = {
   } | null;
   layoutStudioAssets?: {
     introFilepath?: string | null;
+    introDurationSeconds?: number | null;
     outroFilepath?: string | null;
+    outroDurationSeconds?: number | null;
   } | null;
   multiHookTexts?: string[];
   variationParameters?: Partial<RenderOptions> | null;
@@ -1642,19 +1644,17 @@ function fontCandidatesForStudioElement(element: LayoutStudioElement) {
 function studioVideoTimelineDurations(
   template: CanvasLayoutTemplate | null,
   requestedMainDuration: number,
+  options: RenderOptions,
 ) {
   const timeline = template?.timeline;
-  const mainDuration = clampNumber(
-    timeline?.previewDurationSeconds,
-    minRenderDurationSeconds,
-    30,
-    requestedMainDuration,
-  );
+  const mainDuration = clampNumber(requestedMainDuration, 0.1, 30, requestedMainDuration);
+  const introDurationOverride = options.layoutStudioAssets?.introDurationSeconds ?? null;
+  const outroDurationOverride = options.layoutStudioAssets?.outroDurationSeconds ?? null;
   const introDuration = timeline?.introEnabled
-    ? clampNumber(timeline.introDurationSeconds, 1, 30, 2)
+    ? clampNumber(introDurationOverride ?? timeline.introDurationSeconds, 0.1, 30, 2)
     : 0;
   const outroDuration = timeline?.outroEnabled
-    ? clampNumber(timeline.outroDurationSeconds, 1, 30, 2)
+    ? clampNumber(outroDurationOverride ?? timeline.outroDurationSeconds, 0.1, 30, 2)
     : 0;
 
   return {
@@ -1855,6 +1855,7 @@ export async function renderJob(jobId: string) {
   const studioTimelineDurations = studioVideoTimelineDurations(
     studioTemplate,
     requestedMainRenderDuration,
+    renderOptions,
   );
   const requestedRenderDuration = studioTemplate
     ? studioTimelineDurations.totalDuration
