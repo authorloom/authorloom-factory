@@ -822,7 +822,7 @@ function buildLayoutStudioFilterComplex({
           `studio_text_${textIndex}`,
           element,
         ),
-        `[${currentLabel}][studio_text_${textIndex}]overlay=x=${studioOverlayX(element, element.x)}:y=${studioOverlayY(element, element.y)}${mainEnable}[studio_text_after_${textIndex}]`,
+        `[${currentLabel}][studio_text_${textIndex}]overlay=x=${studioCenteredOverlayX(element)}:y=${studioCenteredOverlayY(element)}${mainEnable}[studio_text_after_${textIndex}]`,
       );
       currentLabel = `studio_text_after_${textIndex}`;
       textIndex += 1;
@@ -884,6 +884,30 @@ function studioOverlayY(element: LayoutStudioResolvedElement, fallbackY: number)
   return rotationRadians(element.rotation)
     ? `${Math.round(element.y + element.height / 2)}-h/2`
     : String(Math.round(fallbackY));
+}
+
+function studioCenteredOverlayX(element: LayoutStudioResolvedElement) {
+  return `${Math.round(element.x + element.width / 2)}-w/2`;
+}
+
+function studioCenteredOverlayY(element: LayoutStudioResolvedElement) {
+  return `${Math.round(element.y + element.height / 2)}-h/2`;
+}
+
+function rotatedElementPadding(element: LayoutStudioResolvedElement) {
+  const radians = rotationRadians(element.rotation);
+  if (!radians) return 0;
+
+  const numericRadians = Number(radians);
+  const sin = Math.abs(Math.sin(numericRadians));
+  const cos = Math.abs(Math.cos(numericRadians));
+  const rotatedWidth = element.width * cos + element.height * sin;
+  const rotatedHeight = element.width * sin + element.height * cos;
+  return Math.max(
+    0,
+    (rotatedWidth - element.width) / 2,
+    (rotatedHeight - element.height) / 2,
+  );
 }
 
 function studioElementKey(element: Pick<LayoutStudioElement, "id" | "type" | "x" | "y">) {
@@ -1319,18 +1343,23 @@ async function createLayoutStudioTextOverlay({
         minimumWrappedLineHeight(fit.fontSize, textWrapPaddingY),
       )
     : desiredLineHeight;
+  const shadowPadding = element.shadow
+    ? ((element.shadowBlur ?? 24) + Math.abs(element.shadowDistance ?? 8)) * layoutStudioTypographyScale
+    : 0;
+  const rotationPadding = rotatedElementPadding(element);
+  const overlayPadding = Math.ceil(Math.max(outlineWidth + 8, shadowPadding, rotationPadding));
 
   return createTextOverlayImage({
     campaignId,
     fontCandidates: fontCandidatesForStudioElement(element),
     fontSize: fit.fontSize,
     fontWeight: element.fontWeight ?? 700,
-    height: Math.round(element.height),
+    height: Math.round(element.height + overlayPadding * 2),
     jobId,
     shadowPreset: element.shadow ? "copy" : undefined,
     suffix: `studio-${element.type ?? "text"}-${index}`,
     text: fit.text,
-    width: Math.round(element.width),
+    width: Math.round(element.width + overlayPadding * 2),
     style: {
       backgroundColor: alphaBackground(element.backgroundColor, element.backgroundOpacity),
       border: element.containerOutline
@@ -1360,6 +1389,8 @@ async function createLayoutStudioTextOverlay({
       textWrapPaddingY,
       textWrapRadius: (element.textWrapRadius ?? 18) * layoutStudioTypographyScale,
       verticalAlign: element.verticalAlign ?? "middle",
+      contentWidth: Math.round(element.width),
+      contentHeight: Math.round(element.height),
       wrapShadow: shadowCss(
         element.shadow && Boolean(element.textWrap),
         element.shadowColor,
