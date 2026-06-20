@@ -45,6 +45,38 @@ const hookFont = await getHookFont(config.fontCandidates ?? []);
 const fontFamily = hookFont?.name ?? "sans-serif";
 const fontWeight = Number(config.fontWeight ?? 600);
 const fontSize = Number(config.fontSize);
+const fontStyle = config.italic ? "italic" : "normal";
+const lineHeight = Number.isFinite(Number(config.lineHeight))
+  ? Number(config.lineHeight)
+  : 1.05;
+const textAlign = ["left", "right", "center"].includes(config.textAlign)
+  ? config.textAlign
+  : "center";
+const horizontalAlign = ["left", "right", "center"].includes(config.horizontalAlign)
+  ? config.horizontalAlign
+  : textAlign;
+const verticalAlign = ["top", "bottom", "middle", "center"].includes(config.verticalAlign)
+  ? config.verticalAlign
+  : "center";
+const justifyContent =
+  verticalAlign === "top"
+    ? "flex-start"
+    : verticalAlign === "bottom"
+      ? "flex-end"
+      : "center";
+const alignItems =
+  horizontalAlign === "left"
+    ? "flex-start"
+    : horizontalAlign === "right"
+      ? "flex-end"
+      : "center";
+const lineJustifyContent =
+  textAlign === "left"
+    ? "flex-start"
+    : textAlign === "right"
+      ? "flex-end"
+      : "center";
+const textColor = config.textColor ?? "white";
 const strokeWidth =
   Number.isFinite(Number(config.strokeWidth)) && Number(config.strokeWidth) >= 0
     ? Number(config.strokeWidth)
@@ -65,6 +97,12 @@ const textShadow =
 const emojiShadow = "0 1px 3px rgba(0,0,0,0.16)";
 const emojiPattern =
   /(\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?)*|\p{Emoji_Presentation})/gu;
+
+function cleanStyle(style) {
+  return Object.fromEntries(
+    Object.entries(style).filter(([, value]) => value !== undefined),
+  );
+}
 
 function splitEmojiRuns(text) {
   const runs = [];
@@ -90,18 +128,22 @@ function splitEmojiRuns(text) {
 }
 
 function renderLine(line, lineIndex) {
-  return React.createElement(
-    "div",
+  const lineContent = React.createElement(
+    "span",
     {
-      key: `line-${lineIndex}`,
-      style: {
-        alignItems: "center",
-        display: "flex",
-        flexDirection: "row",
-        justifyContent: "center",
-        lineHeight: 1.05,
-        width: "100%",
-      },
+      style: config.textWrap
+        ? cleanStyle({
+            background: config.textWrapBackground ?? "rgba(17,17,17,0.85)",
+            borderRadius: Number(config.textWrapRadius ?? 18),
+            boxShadow: config.wrapShadow,
+            display: "flex",
+            flexDirection: "row",
+            padding: `${Number(config.textWrapPaddingY ?? 6)}px ${Number(config.textWrapPaddingX ?? 12)}px`,
+          })
+        : {
+            display: "flex",
+            flexDirection: "row",
+          },
     },
     splitEmojiRuns(line).map((run, runIndex) =>
       React.createElement(
@@ -117,7 +159,7 @@ function renderLine(line, lineIndex) {
                   textShadow: emojiShadow,
                 }
               : {
-                  WebkitTextStrokeColor: "rgba(0,0,0,0.98)",
+                  WebkitTextStrokeColor: config.outlineColor ?? "rgba(0,0,0,0.98)",
                   WebkitTextStrokeWidth: strokeWidth,
                   paintOrder: "stroke fill",
                   textShadow,
@@ -126,6 +168,22 @@ function renderLine(line, lineIndex) {
         run.value,
       ),
     ),
+  );
+
+  return React.createElement(
+    "div",
+    {
+      key: `line-${lineIndex}`,
+      style: cleanStyle({
+        alignItems: "center",
+        display: "flex",
+        flexDirection: "row",
+        justifyContent: lineJustifyContent,
+        lineHeight,
+        width: "100%",
+      }),
+    },
+    lineContent,
   );
 }
 
@@ -136,24 +194,28 @@ const imageStream = await unstable_createNodejsStream(
   React.createElement(
     "div",
     {
-      style: {
-        alignItems: "center",
-        background: "transparent",
-        color: "white",
+      style: cleanStyle({
+        alignItems,
+        background: config.backgroundColor ?? "transparent",
+        border: config.border ? config.border : undefined,
+        borderRadius: Number(config.borderRadius ?? 0),
+        boxShadow: config.containerShadow,
+        color: textColor,
         display: "flex",
         fontFamily,
         flexDirection: "column",
         fontSize,
         fontWeight,
+        fontStyle,
         height: Number(config.height),
-        justifyContent: "center",
+        justifyContent,
         letterSpacing: "0",
-        lineHeight: 1.05,
-        padding: "0 12px",
-        textAlign: "center",
+        lineHeight,
+        padding: config.padding ?? "0 12px",
+        textAlign,
         width: Number(config.width),
         whiteSpace: "pre",
-      },
+      }),
     },
     renderedText,
   ),
@@ -167,7 +229,7 @@ const imageStream = await unstable_createNodejsStream(
             name: hookFont.name,
             data: hookFont.data,
             weight: fontWeight,
-            style: "normal",
+            style: fontStyle,
           },
         ]
       : undefined,
