@@ -101,8 +101,9 @@ const textShadow =
       : hookTextShadow;
 
 const emojiShadow = "0 1px 3px rgba(0,0,0,0.16)";
-const emojiPattern =
-  /(\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?)*|\p{Emoji_Presentation})/gu;
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const emojiPattern = /\p{Emoji}/u;
+const emojiStyle = config.emojiStyle ?? process.env.AUTHORLOOM_EMOJI_STYLE ?? "noto";
 
 function cleanStyle(style) {
   return Object.fromEntries(
@@ -112,22 +113,22 @@ function cleanStyle(style) {
 
 function splitEmojiRuns(text) {
   const runs = [];
-  let lastIndex = 0;
+  let textRun = "";
 
-  for (const match of text.matchAll(emojiPattern)) {
-    const index = match.index ?? 0;
-    const value = match[0];
-
-    if (index > lastIndex) {
-      runs.push({ type: "text", value: text.slice(lastIndex, index) });
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    if (emojiPattern.test(segment)) {
+      if (textRun) {
+        runs.push({ type: "text", value: textRun });
+        textRun = "";
+      }
+      runs.push({ type: "emoji", value: segment });
+    } else {
+      textRun += segment;
     }
-
-    runs.push({ type: "emoji", value });
-    lastIndex = index + value.length;
   }
 
-  if (lastIndex < text.length) {
-    runs.push({ type: "text", value: text.slice(lastIndex) });
+  if (textRun) {
+    runs.push({ type: "text", value: textRun });
   }
 
   return runs.length ? runs : [{ type: "text", value: text }];
@@ -241,7 +242,7 @@ const imageStream = await unstable_createNodejsStream(
   {
     width: Number(config.width),
     height: Number(config.height),
-    emoji: "twemoji",
+    emoji: emojiStyle,
     fonts: hookFont
       ? [
           {

@@ -107,12 +107,17 @@ type RenderAssetRef = {
   previewUrl?: string | null;
   renderSourceUrl?: string | null;
   renderSourceMimeType?: string | null;
+  sourceMediaId?: string | null;
+  previewMediaId?: string | null;
+  thumbnailMediaId?: string | null;
+  renderSourceMediaId?: string | null;
   audioUrl?: string | null;
   text?: string | null;
 };
 
 type RenderInstruction = {
   videoOutputId: Id<"videoOutputs">;
+  postType?: "video_post" | "scenes_video_post" | "tiktok_slides_post" | "instagram_carousel_post" | null;
   forceRerender?: boolean | null;
   fingerprint: string;
   campaignId?: string | null;
@@ -138,6 +143,7 @@ type RenderInstruction = {
     outro?: RenderAssetRef | null;
   };
   renderOptions?: {
+    postType?: "video_post" | "scenes_video_post" | "tiktok_slides_post" | "instagram_carousel_post" | null;
     durationSeconds?: number | null;
     audioStartOffsetSeconds?: number | null;
     thumbnailIntroSeconds?: number | null;
@@ -153,6 +159,18 @@ type RenderInstruction = {
     layoutTemplateJson?: unknown;
     layoutStudioAssets?: unknown;
     multiHookTexts?: string[] | null;
+    postCopy?: {
+      caption?: string | null;
+      hashtags?: string[];
+      keywords?: string[];
+      keywordOrder?: string[];
+      keywordCategories?: string[];
+      ctaText?: string | null;
+      tropes?: string[];
+      renderedBookTitleLine?: string | null;
+      metadataTemplateId?: string | null;
+    };
+    sceneVideoPost?: unknown;
   };
   postCopy?: {
     caption?: string | null;
@@ -654,6 +672,14 @@ async function downloadPreviewObjectFromStorage(
     );
   }
 
+  await downloadStorageObjectFromBucket(bucketName, objectName, filepath);
+}
+
+async function downloadStorageObjectFromBucket(
+  bucketName: string,
+  objectName: string,
+  filepath: string,
+) {
   const url = `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(
     bucketName,
   )}/o/${encodeURIComponent(objectName)}?alt=media`;
@@ -664,7 +690,7 @@ async function downloadPreviewObjectFromStorage(
   if (!response.ok) {
     const body = await response.text().catch(() => "");
     throw new Error(
-      `Could not download Cloud Storage render source ${objectName}: ${response.status} ${response.statusText} ${body.slice(
+      `Could not download Cloud Storage render source ${bucketName}/${objectName}: ${response.status} ${response.statusText} ${body.slice(
         0,
         300,
       )}`,
@@ -729,17 +755,23 @@ async function uploadRenderedPreviewToStorage(input: {
 }
 
 async function ensureSourceFileDownloaded(input: {
+  asset?: RenderAssetRef | null;
   sourceUrl?: string | null;
   filename?: string | null;
   directory: string;
   fallbackFilename: string;
 }) {
-  if (!input.sourceUrl) {
+  const mediaSource = input.asset ? await resolveMediaSource(input.asset) : null;
+
+  if (!input.sourceUrl && !mediaSource) {
     throw new Error(`${input.fallbackFilename} is missing a GCS render source URL.`);
   }
 
   await fs.mkdir(input.directory, { recursive: true });
-  const filename = safeFilename(input.filename, input.fallbackFilename);
+  const filename = safeFilename(
+    input.filename ?? mediaSource?.filename,
+    input.fallbackFilename,
+  );
   const filepath = path.join(input.directory, filename);
 
   try {
@@ -747,21 +779,42 @@ async function ensureSourceFileDownloaded(input: {
     console.log(`Source asset already cached: ${filepath}`);
     return filepath;
   } catch {
-    console.log(`Downloading source asset ${input.sourceUrl} -> ${filepath}`);
+    const sourceLabel = mediaSource
+      ? `${mediaSource.bucketName}/${mediaSource.objectName}`
+      : input.sourceUrl;
+
+    console.log(`Downloading source asset ${sourceLabel} -> ${filepath}`);
+
+    if (mediaSource) {
+      await downloadStorageObjectFromBucket(
+        mediaSource.bucketName,
+        mediaSource.objectName,
+        filepath,
+      );
+      console.log(`Source asset downloaded: ${filepath}`);
+      return filepath;
+    }
+
+    const sourceUrl = input.sourceUrl;
+
+    if (!sourceUrl) {
+      throw new Error(`${input.fallbackFilename} is missing a GCS render source URL.`);
+    }
+
     const previewObjectName =
-      getPreviewObjectNameFromUrl(input.sourceUrl) ??
-      getStorageObjectNameFromUrl(input.sourceUrl);
+      getPreviewObjectNameFromUrl(sourceUrl) ??
+      getStorageObjectNameFromUrl(sourceUrl);
 
     if (previewObjectName) {
       await downloadPreviewObjectFromStorage(previewObjectName, filepath);
     } else {
-      const response = await fetch(input.sourceUrl, {
-        headers: sourceRequestHeaders(input.sourceUrl),
+      const response = await fetch(sourceUrl, {
+        headers: sourceRequestHeaders(sourceUrl),
       });
       if (!response.ok) {
         const body = await response.text().catch(() => "");
         throw new Error(
-          `Could not download source asset from ${input.sourceUrl}: ${response.status} ${response.statusText} ${body.slice(
+          `Could not download source asset from ${sourceUrl}: ${response.status} ${response.statusText} ${body.slice(
             0,
             300,
           )}`,
@@ -773,6 +826,59 @@ async function ensureSourceFileDownloaded(input: {
     console.log(`Source asset downloaded: ${filepath}`);
     return filepath;
   }
+}
+
+function mediaIdForAsset(asset: RenderAssetRef) {
+  if (asset.type === "background") {
+    return (
+      asset.renderSourceMediaId ??
+      asset.sourceMediaId ??
+      asset.previewMediaId ??
+      asset.thumbnailMediaId ??
+      null
+    );
+  }
+
+  return (
+    asset.renderSourceMediaId ??
+    asset.sourceMediaId ??
+    asset.previewMediaId ??
+    asset.thumbnailMediaId ??
+    null
+  );
+}
+
+async function resolveMediaSource(asset: RenderAssetRef) {
+  const mediaId = mediaIdForAsset(asset);
+
+  if (!mediaId) {
+    return null;
+  }
+
+  const result = await client.query(api.productionJobs.workerMediaSource, {
+    workerSecret: requiredWorkerSecret,
+    mediaId,
+  }) as {
+    success: boolean;
+    message?: string;
+    media?: {
+      bucketName?: string | null;
+      objectName?: string | null;
+      filename?: string | null;
+    } | null;
+  };
+
+  if (!result.success || !result.media?.bucketName || !result.media.objectName) {
+    throw new Error(
+      result.message ?? `Could not resolve media source ${mediaId} for production render.`,
+    );
+  }
+
+  return {
+    bucketName: result.media.bucketName,
+    objectName: result.media.objectName,
+    filename: result.media.filename ?? asset.filename ?? null,
+  };
 }
 
 function ensureLocalAuthor(input: RenderCampaignInput) {
@@ -1108,9 +1214,10 @@ function upsertRenderJob(input: {
 }) {
   const db = getDatabase();
   initializeDatabase(db);
-  const duration = input.video.renderOptions?.durationSeconds ?? null;
+  const renderOptions = normalizeSceneRenderOptions(input.video.renderOptions, input.video.postType);
+  const duration = renderOptions?.durationSeconds ?? null;
   const audioStartOffset =
-    input.video.renderOptions?.audioStartOffsetSeconds ?? null;
+    renderOptions?.audioStartOffsetSeconds ?? null;
   const captionBlocks = [
     input.video.postCopy?.caption?.trim(),
     ...(input.video.postCopy?.hashtags ?? []),
@@ -1186,8 +1293,19 @@ function upsertRenderJob(input: {
     duration,
     audioStartOffset,
     JSON.stringify({
-      ...(input.video.renderOptions ?? {}),
-      postCopy: input.video.postCopy ?? null,
+      ...(renderOptions ?? {}),
+      postCopy: {
+        ...((renderOptions?.postCopy && typeof renderOptions.postCopy === "object")
+          ? renderOptions.postCopy
+          : {}),
+        ...((input.video.postCopy && typeof input.video.postCopy === "object")
+          ? input.video.postCopy
+          : {}),
+        renderedBookTitleLine:
+          renderOptions?.postCopy?.renderedBookTitleLine?.trim() ||
+          input.video.postCopy?.renderedBookTitleLine?.trim() ||
+          null,
+      },
       creativeSignature: input.video.creativeSignature ?? null,
       diversityScore: input.video.diversityScore ?? null,
       safeAreaWarnings: input.video.safeAreaWarnings ?? [],
@@ -1195,6 +1313,51 @@ function upsertRenderJob(input: {
     }),
     captionBlocks.join("\n\n"),
   );
+}
+
+function normalizeSceneRenderOptions(
+  renderOptions: RenderInstruction["renderOptions"],
+  postType: RenderInstruction["postType"],
+) {
+  if (!renderOptions) return renderOptions;
+
+  const sceneVideoPost =
+    renderOptions.sceneVideoPost && typeof renderOptions.sceneVideoPost === "object"
+      ? renderOptions.sceneVideoPost
+      : null;
+
+  if (!sceneVideoPost) {
+    return {
+      ...renderOptions,
+      postType: postType ?? renderOptions.postType ?? null,
+    };
+  }
+
+  const scenes = Array.isArray((sceneVideoPost as { scenes?: unknown }).scenes)
+    ? (sceneVideoPost as { scenes: unknown[] }).scenes
+    : [];
+  const sceneHookTexts = scenes
+    .map((scene) => {
+      if (!scene || typeof scene !== "object") return null;
+      const assets = (scene as { assets?: unknown }).assets;
+      if (!assets || typeof assets !== "object") return null;
+      const hook = (assets as { hook?: unknown }).hook;
+      if (!hook || typeof hook !== "object") return null;
+      const text =
+        (hook as { text?: unknown; label?: unknown }).text ??
+        (hook as { text?: unknown; label?: unknown }).label;
+      return typeof text === "string" && text.trim() ? text.trim() : null;
+    })
+    .filter((text): text is string => Boolean(text));
+
+  return {
+    ...renderOptions,
+    postType: "scenes_video_post" as const,
+    layoutTemplate: "booktok_full_background_multi_hook",
+    multiHookTexts: sceneHookTexts.length > 0
+      ? sceneHookTexts
+      : renderOptions.multiHookTexts ?? null,
+  };
 }
 
 async function prepareLocalRenderJob(input: {
@@ -1208,6 +1371,7 @@ async function prepareLocalRenderJob(input: {
     resolveSourceUrl(input.video.assets.screenshot.renderSourceUrl) ??
     resolveSourceUrl(input.video.assets.screenshot.previewUrl);
   const screenshotFile = await ensureSourceFileDownloaded({
+    asset: input.video.assets.screenshot,
     sourceUrl: screenshotPreviewUrl,
     filename: screenshotPreviewUrl
       ? `${input.video.screenshotAssetId}.jpg`
@@ -1219,6 +1383,7 @@ async function prepareLocalRenderJob(input: {
     resolveSourceUrl(input.video.assets.background.renderSourceUrl) ??
     resolveSourceUrl(input.video.assets.background.previewUrl);
   const backgroundFile = await ensureSourceFileDownloaded({
+    asset: input.video.assets.background,
     sourceUrl: backgroundSourceUrl,
     filename: backgroundSourceUrl
       ? `${input.video.backgroundAssetId}${path.extname(input.video.assets.background.filename ?? "") || ".mp4"}`
@@ -1233,6 +1398,7 @@ async function prepareLocalRenderJob(input: {
     : null;
   const thumbnailFile = thumbnailSourceUrl
     ? await ensureSourceFileDownloaded({
+        asset: thumbnailAsset,
         sourceUrl: thumbnailSourceUrl,
         filename: thumbnailSourceUrl
           ? `${input.video.thumbnailAssetId ?? "thumbnail"}.jpg`
@@ -1248,6 +1414,7 @@ async function prepareLocalRenderJob(input: {
     : null;
   const introFile = introSourceUrl
     ? await ensureSourceFileDownloaded({
+        asset: introAsset,
         sourceUrl: introSourceUrl,
         filename: introSourceUrl
           ? `${introAsset?.assetId ?? "intro"}${path.extname(introAsset?.filename ?? "") || ".jpg"}`
@@ -1263,6 +1430,7 @@ async function prepareLocalRenderJob(input: {
     : null;
   const outroFile = outroSourceUrl
     ? await ensureSourceFileDownloaded({
+        asset: outroAsset,
         sourceUrl: outroSourceUrl,
         filename: outroSourceUrl
           ? `${outroAsset?.assetId ?? "outro"}${path.extname(outroAsset?.filename ?? "") || ".jpg"}`
@@ -1279,12 +1447,17 @@ async function prepareLocalRenderJob(input: {
     null;
   const audioFile = audioSourceUrl
     ? await ensureSourceFileDownloaded({
+        asset: audioAsset,
         sourceUrl: audioSourceUrl,
         filename: audioAsset?.filename,
         directory: path.join(paths.audioDirectory, "authorloom"),
         fallbackFilename: `${input.video.audioTrackId ?? input.video.audioAssetId ?? "authorloom-audio"}.m4a`,
       })
     : null;
+  const sceneVideoPost = await prepareSceneVideoPostAssets({
+    sceneVideoPost: input.video.renderOptions?.sceneVideoPost,
+    localBookId: input.localBookId,
+  });
   const screenshotId = ensureBookScreenshot({
     bookId: input.localBookId,
     asset: input.video.assets.screenshot,
@@ -1322,6 +1495,8 @@ async function prepareLocalRenderJob(input: {
       ...input.video,
       renderOptions: {
         ...(input.video.renderOptions ?? {}),
+        postType: input.video.postType ?? null,
+        sceneVideoPost,
         layoutStudioAssets: {
           ...(
             input.video.renderOptions?.layoutStudioAssets &&
@@ -1342,6 +1517,114 @@ async function prepareLocalRenderJob(input: {
     audioId,
     thumbnailId,
   });
+}
+
+async function prepareSceneVideoPostAssets(input: {
+  sceneVideoPost: unknown;
+  localBookId: string;
+}) {
+  if (!input.sceneVideoPost || typeof input.sceneVideoPost !== "object") {
+    return input.sceneVideoPost ?? null;
+  }
+
+  const sceneVideoPost = input.sceneVideoPost as Record<string, unknown>;
+  const scenes = Array.isArray(sceneVideoPost.scenes) ? sceneVideoPost.scenes : null;
+
+  if (!scenes) {
+    return sceneVideoPost;
+  }
+
+  return {
+    ...sceneVideoPost,
+    scenes: await Promise.all(
+      scenes.map(async (scene, sceneIndex) => {
+        if (!scene || typeof scene !== "object") return scene;
+
+        const sceneRecord = scene as Record<string, unknown>;
+        const assets =
+          sceneRecord.assets && typeof sceneRecord.assets === "object"
+            ? (sceneRecord.assets as Record<string, unknown>)
+            : null;
+
+        if (!assets) return sceneRecord;
+
+        return {
+          ...sceneRecord,
+          assets: {
+            ...assets,
+            background: await prepareSceneAssetRef({
+              asset: assets.background,
+              localBookId: input.localBookId,
+              sceneIndex,
+              slot: "background",
+            }),
+            image: await prepareSceneAssetRef({
+              asset: assets.image,
+              localBookId: input.localBookId,
+              sceneIndex,
+              slot: "image",
+            }),
+            screenshot: await prepareSceneAssetRef({
+              asset: assets.screenshot,
+              localBookId: input.localBookId,
+              sceneIndex,
+              slot: "screenshot",
+            }),
+            hook: assets.hook,
+            cta: assets.cta,
+            keywords: assets.keywords,
+            tropes: assets.tropes,
+          },
+        };
+      }),
+    ),
+  };
+}
+
+async function prepareSceneAssetRef(input: {
+  asset: unknown;
+  localBookId: string;
+  sceneIndex: number;
+  slot: string;
+}) {
+  if (!input.asset || typeof input.asset !== "object") {
+    return input.asset ?? null;
+  }
+
+  const asset = input.asset as RenderAssetRef;
+  const sourceUrl =
+    resolveSourceUrl(asset.renderSourceUrl) ??
+    resolveSourceUrl(asset.previewUrl);
+
+  if (!sourceUrl && !mediaIdForAsset(asset)) {
+    return asset;
+  }
+
+  const assetId = asset.assetId ?? `scene-${input.sceneIndex + 1}-${input.slot}`;
+  const extension = path.extname(asset.filename ?? "") || fallbackExtensionForAsset(asset);
+  const filepath = await ensureSourceFileDownloaded({
+    asset,
+    sourceUrl,
+    filename: `${assetId}${extension}`,
+    directory: path.join(paths.backgroundsDirectory, input.localBookId, "scenes"),
+    fallbackFilename: `${assetId}${extension}`,
+  });
+
+  return {
+    ...asset,
+    filepath,
+  };
+}
+
+function fallbackExtensionForAsset(asset: RenderAssetRef) {
+  const mimeType = asset.renderSourceMimeType?.toLowerCase() ?? "";
+
+  if (mimeType.includes("png")) return ".png";
+  if (mimeType.includes("webp")) return ".webp";
+  if (mimeType.includes("jpeg") || mimeType.includes("jpg")) return ".jpg";
+  if (mimeType.includes("mp4")) return ".mp4";
+  if (asset.type === "background") return ".mp4";
+  return ".jpg";
 }
 
 async function processRenderCampaign(job: ClaimedJob) {

@@ -26,6 +26,10 @@ const outputVideoMaxrate = "12M";
 const outputVideoBufsize = "20M";
 const outputAudioBitrate = "128k";
 const outputAudioSampleRate = "48000";
+const outputColorSpace = "bt709";
+const outputColorRange = "tv";
+const ffmpegBinary = process.env.FFMPEG_PATH ?? process.env.AUTHORLOOM_FFMPEG_PATH ?? "ffmpeg";
+const ffprobeBinary = process.env.FFPROBE_PATH ?? process.env.AUTHORLOOM_FFPROBE_PATH ?? "ffprobe";
 
 // Organic Reels/TikTok safe area.
 const safeTop = 160;
@@ -56,11 +60,28 @@ type CoverOverlayInput = OverlayInput & {
 type HookOverlayInput = OverlayInput & {
   startSeconds?: number;
   endSeconds?: number;
+  element?: LayoutStudioResolvedElement | null;
+};
+
+type SceneVisualOverlayInput = OverlayInput & {
+  element?: LayoutStudioResolvedElement | null;
+  filepath: string;
+  width: number;
+  startSeconds: number;
+  endSeconds: number;
 };
 
 type MediaDimensions = {
   width: number;
   height: number;
+};
+
+type VideoColorMetadata = {
+  pixelFormat?: string;
+  colorRange?: string;
+  colorSpace?: string;
+  colorTransfer?: string;
+  colorPrimaries?: string;
 };
 
 type Layout = {
@@ -72,6 +93,7 @@ type Layout = {
 };
 
 type RenderOptions = {
+  postType?: "video_post" | "scenes_video_post" | "tiktok_slides_post" | "instagram_carousel_post" | null;
   backgroundStartTime?: number;
   backgroundEndTime?: number;
   playbackSpeed?: number;
@@ -106,6 +128,44 @@ type RenderOptions = {
     ctaText?: string | null;
     tropes?: string[];
     renderedBookTitleLine?: string | null;
+  } | null;
+  sceneVideoPost?: {
+    scenes?: Array<{
+      sceneId?: string | null;
+      durationSeconds?: number | null;
+      metadataTemplateId?: string | null;
+      renderedMetadataLine?: string | null;
+      assets?: {
+        background?: {
+          filepath?: string | null;
+          type?: string | null;
+        } | null;
+        image?: {
+          filepath?: string | null;
+          type?: string | null;
+        } | null;
+        screenshot?: {
+          filepath?: string | null;
+          type?: string | null;
+        } | null;
+        hook?: {
+          text?: string | null;
+          label?: string | null;
+        } | null;
+        cta?: {
+          text?: string | null;
+          label?: string | null;
+        } | null;
+        keywords?: Array<{
+          text?: string | null;
+          label?: string | null;
+        }> | null;
+        tropes?: Array<{
+          text?: string | null;
+          label?: string | null;
+        }> | null;
+      } | null;
+    }>;
   } | null;
 };
 
@@ -150,6 +210,7 @@ type CanvasLayoutTemplate = {
     | Partial<Record<"hook" | "cover" | "screenshot" | "metadataLine" | "keywords", CanvasLayoutBox>>
     | LayoutStudioElement[];
   scenes?: Array<{
+    id?: string;
     elements?: LayoutStudioElement[];
   }>;
   overlay?: {
@@ -266,7 +327,7 @@ function commandErrorMessage(error: unknown) {
 
 async function getMediaDimensions(filepath: string): Promise<MediaDimensions> {
   const result = await runCommand(
-    "ffprobe",
+    ffprobeBinary,
     [
       "-v",
       "error",
@@ -299,7 +360,7 @@ async function getMediaDimensions(filepath: string): Promise<MediaDimensions> {
 
 async function getMediaDurationSeconds(filepath: string): Promise<number | null> {
   const result = await runCommand(
-    "ffprobe",
+    ffprobeBinary,
     [
       "-v",
       "error",
@@ -314,6 +375,70 @@ async function getMediaDurationSeconds(filepath: string): Promise<number | null>
   const duration = Number.parseFloat(result.stdout.trim());
 
   return Number.isFinite(duration) && duration > 0 ? duration : null;
+}
+
+async function getVideoColorMetadata(
+  filepath: string,
+): Promise<VideoColorMetadata | null> {
+  const result = await runCommand(
+    ffprobeBinary,
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=pix_fmt,color_range,color_space,color_transfer,color_primaries",
+      "-of",
+      "json",
+      filepath,
+    ],
+    { all: true },
+  );
+
+  const parsed = JSON.parse(result.stdout || "{}") as {
+    streams?: Array<{
+      pix_fmt?: string;
+      color_range?: string;
+      color_space?: string;
+      color_transfer?: string;
+      color_primaries?: string;
+    }>;
+  };
+  const stream = parsed.streams?.[0];
+
+  if (!stream) {
+    return null;
+  }
+
+  return {
+    pixelFormat: stream.pix_fmt,
+    colorRange: stream.color_range,
+    colorSpace: stream.color_space,
+    colorTransfer: stream.color_transfer,
+    colorPrimaries: stream.color_primaries,
+  };
+}
+
+function isHdrVideo(metadata: VideoColorMetadata | null | undefined) {
+  const colorTransfer = metadata?.colorTransfer?.toLowerCase();
+  const colorPrimaries = metadata?.colorPrimaries?.toLowerCase();
+  const colorSpace = metadata?.colorSpace?.toLowerCase();
+  const pixelFormat = metadata?.pixelFormat?.toLowerCase();
+
+  return (
+    colorTransfer === "arib-std-b67" ||
+    colorTransfer === "smpte2084" ||
+    colorPrimaries === "bt2020" ||
+    colorSpace === "bt2020nc" ||
+    colorSpace === "bt2020c" ||
+    Boolean(pixelFormat?.includes("10") && (
+      colorTransfer === "arib-std-b67" ||
+      colorTransfer === "smpte2084" ||
+      colorPrimaries?.includes("2020") ||
+      colorSpace?.includes("2020")
+    ))
+  );
 }
 
 async function fileExists(filepath: string | null) {
@@ -368,13 +493,13 @@ async function prepareScreenshotForRender({
           { file: "heif-convert", args: [screenshotFilepath, outputFilepath] },
           { file: "magick", args: [screenshotFilepath, outputFilepath] },
           { file: "convert", args: [screenshotFilepath, outputFilepath] },
-          { file: "ffmpeg", args: ["-y", "-i", screenshotFilepath, outputFilepath] },
+          { file: ffmpegBinary, args: ["-y", "-i", screenshotFilepath, outputFilepath] },
         ]
       : [
           { file: "heif-convert", args: [screenshotFilepath, outputFilepath] },
           { file: "magick", args: [screenshotFilepath, outputFilepath] },
           { file: "convert", args: [screenshotFilepath, outputFilepath] },
-          { file: "ffmpeg", args: ["-y", "-i", screenshotFilepath, outputFilepath] },
+          { file: ffmpegBinary, args: ["-y", "-i", screenshotFilepath, outputFilepath] },
         ];
   const errors: string[] = [];
 
@@ -432,11 +557,13 @@ function calculateLayout({
 }
 
 function buildImageTextFilterComplex({
+  backgroundColorMetadata,
   layout,
   options,
   screenshotDimensions,
   hookOverlayInputIndex,
   hookOverlays = [],
+  sceneVisualOverlays = [],
   coverOverlay,
   metadataOverlay,
   keywordsOverlay,
@@ -444,11 +571,13 @@ function buildImageTextFilterComplex({
   studioTimeline,
   outputLabel = "vout",
 }: {
+  backgroundColorMetadata?: VideoColorMetadata | null;
   layout: Layout;
   options?: RenderOptions;
   screenshotDimensions: MediaDimensions;
   hookOverlayInputIndex?: number | null;
   hookOverlays?: HookOverlayInput[];
+  sceneVisualOverlays?: SceneVisualOverlayInput[];
   coverOverlay?: CoverOverlayInput | null;
   metadataOverlay?: OverlayInput | null;
   keywordsOverlay?: OverlayInput | null;
@@ -481,7 +610,12 @@ function buildImageTextFilterComplex({
   const isCoverCenterLayout = layoutTemplate === "left_cover_center_screenshot";
   const isCoverOffsetLayout = layoutTemplate === "left_cover_offset_screenshot";
   const isCoverLayout = isCoverCenterLayout || isCoverOffsetLayout;
-  const isFullBackgroundLayout = layoutTemplate === "booktok_full_background_multi_hook";
+  const isSceneVideoPost =
+    effectiveOptions.postType === "scenes_video_post" ||
+    Boolean(options?.sceneVideoPost) ||
+    sceneVisualOverlays.length > 0;
+  const isFullBackgroundLayout =
+    layoutTemplate === "booktok_full_background_multi_hook" || isSceneVideoPost;
   const layoutVerticalNudge = isFullBackgroundLayout ? 0 : defaultLayoutVerticalNudge;
   const cropVariant = effectiveOptions.cropVariant ?? "center";
   const scaledCanvasWidth = Math.round(canvasWidth * zoomLevel);
@@ -599,6 +733,22 @@ function buildImageTextFilterComplex({
   );
   const textFilters: string[] = [];
   let currentLabel = coverOverlay ? "withcover" : "withhook";
+  const backgroundScaleFilter = isHdrVideo(backgroundColorMetadata)
+    ? `zscale=t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=hable:desat=0,` +
+      `zscale=p=${outputColorSpace}:t=${outputColorSpace}:m=${outputColorSpace}:r=${outputColorRange},` +
+      `format=yuv420p,` +
+      `scale=${scaledCanvasWidth}:${scaledCanvasHeight}` +
+      `:force_original_aspect_ratio=increase` +
+      `:flags=lanczos` +
+      `:in_range=${outputColorRange}` +
+      `:out_range=${outputColorRange}` +
+      `:out_color_matrix=${outputColorSpace}`
+    : `scale=${scaledCanvasWidth}:${scaledCanvasHeight}` +
+      `:force_original_aspect_ratio=increase` +
+      `:flags=lanczos` +
+      `:in_range=auto` +
+      `:out_range=${outputColorRange}` +
+      `:out_color_matrix=${outputColorSpace}`;
 
   if (metadataOverlay) {
     textFilters.push(
@@ -621,10 +771,10 @@ function buildImageTextFilterComplex({
   }
 
   const baseFilters = [
-    `[0:v]setpts=${(1 / playbackSpeed).toFixed(5)}*PTS,scale=${scaledCanvasWidth}:${scaledCanvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY}[bg]`,
+    `[0:v]setpts=${(1 / playbackSpeed).toFixed(5)}*PTS,${backgroundScaleFilter},crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY},setsar=1,format=yuv420p[bg]`,
   ];
   const customTemplate = customCanvasTemplate(effectiveOptions);
-  const studioTemplate = layoutStudioTemplate(effectiveOptions);
+  const studioTemplate = isSceneVideoPost ? null : layoutStudioTemplate(effectiveOptions);
 
   if (studioTemplate) {
     return buildLayoutStudioFilterComplex({
@@ -705,6 +855,29 @@ function buildImageTextFilterComplex({
     const timedHookFilters: string[] = [];
     let timedHookInputLabel = "bg";
 
+    sceneVisualOverlays.forEach((overlay, index) => {
+      const visualLabel = `scenevisual${index}`;
+      const outputVisualLabel = `withscenevisual${index}`;
+      const enable = `:enable='gte(t,${overlay.startSeconds})*lt(t,${overlay.endSeconds})'`;
+
+      if (overlay.element) {
+        const media = fitMediaIntoStudioElement(overlay.element, {
+          width: overlay.width,
+          height: overlay.height,
+        });
+        timedHookFilters.push(
+          ...media.filters(`[${overlay.inputIndex}:v]setpts=PTS-STARTPTS,`, visualLabel),
+          `[${timedHookInputLabel}][${visualLabel}]overlay=x=${studioOverlayX(overlay.element, media.x)}:y=${studioOverlayY(overlay.element, media.y)}${enable}:eof_action=pass[${outputVisualLabel}]`,
+        );
+      } else {
+        timedHookFilters.push(
+          `[${overlay.inputIndex}:v]setpts=PTS-STARTPTS,scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${canvasWidth}:${canvasHeight}:(iw-ow)/2:(ih-oh)/2,setsar=1,format=rgba[${visualLabel}]`,
+          `[${timedHookInputLabel}][${visualLabel}]overlay=x=0:y=0${enable}:eof_action=pass[${outputVisualLabel}]`,
+        );
+      }
+      timedHookInputLabel = outputVisualLabel;
+    });
+
     hookOverlays.forEach((overlay, index) => {
       const hookLabel = `hook${index}`;
       const outputHookLabel = `withhook${index}`;
@@ -713,10 +886,18 @@ function buildImageTextFilterComplex({
         typeof overlay.endSeconds === "number"
           ? `:enable='between(t,${overlay.startSeconds},${overlay.endSeconds})'`
           : "";
+      const hookX = overlay.element ? studioCenteredOverlayX(overlay.element) : "(W-w)/2";
+      const hookYPosition = overlay.element
+        ? studioCenteredOverlayY(overlay.element)
+        : String(Math.round(nudgedHookY));
 
       timedHookFilters.push(
-        `[${overlay.inputIndex}:v]format=rgba[${hookLabel}]`,
-        `[${timedHookInputLabel}][${hookLabel}]overlay=x=(W-w)/2:y=${Math.round(nudgedHookY)}${enable}[${outputHookLabel}]`,
+        ...studioOverlayInputFilters(
+          `[${overlay.inputIndex}:v]setpts=PTS-STARTPTS,`,
+          hookLabel,
+          overlay.element ?? {},
+        ),
+        `[${timedHookInputLabel}][${hookLabel}]overlay=x=${hookX}:y=${hookYPosition}${enable}:eof_action=pass[${outputHookLabel}]`,
       );
       timedHookInputLabel = outputHookLabel;
     });
@@ -786,7 +967,7 @@ function buildLayoutStudioFilterComplex({
     const elementType = element.type;
 
     if (elementType === "screenshot") {
-      const media = fitMediaIntoStudioElement(element, screenshotDimensions, mediaIndex);
+      const media = fitMediaIntoStudioElement(element, screenshotDimensions);
       filters.push(
         ...media.filters("[1:v]", `studio_shot_${mediaIndex}`),
         `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${mainEnable}[studio_after_${mediaIndex}]`,
@@ -800,7 +981,6 @@ function buildLayoutStudioFilterComplex({
       const media = fitMediaIntoStudioElement(
         element,
         { width: coverOverlay.width, height: coverOverlay.height },
-        mediaIndex,
       );
       filters.push(
         ...media.filters(`[${coverOverlay.inputIndex}:v]`, `studio_cover_${mediaIndex}`),
@@ -1047,7 +1227,6 @@ function effectiveContainedHeight(
 function fitMediaIntoStudioElement(
   element: LayoutStudioResolvedElement,
   dimensions: MediaDimensions,
-  index: number,
 ) {
   const padding = clampNumber(element.padding, 0, Math.min(element.width, element.height) / 2, 0);
   const box = {
@@ -1056,10 +1235,23 @@ function fitMediaIntoStudioElement(
     width: Math.max(1, element.width - padding * 2),
     height: Math.max(1, element.height - padding * 2),
   };
-  const fit = element.fit === "cover" ? "cover" : "contain";
+  const rotation = rotationRadians(element.rotation);
+  const fit = rotation ? "contain" : element.fit === "cover" ? "cover" : "contain";
   const scale = fit === "cover"
     ? Math.max(box.width / dimensions.width, box.height / dimensions.height)
-    : Math.min(box.width / dimensions.width, box.height / dimensions.height);
+    : rotation
+      ? (() => {
+          const radians = Number(rotation);
+          const sin = Math.abs(Math.sin(radians));
+          const cos = Math.abs(Math.cos(radians));
+          const rotatedWidthFactor = dimensions.width * cos + dimensions.height * sin;
+          const rotatedHeightFactor = dimensions.width * sin + dimensions.height * cos;
+          return Math.min(
+            box.width / Math.max(1, rotatedWidthFactor),
+            box.height / Math.max(1, rotatedHeightFactor),
+          );
+        })()
+      : Math.min(box.width / dimensions.width, box.height / dimensions.height);
   const width = Math.max(1, Math.round(dimensions.width * scale));
   const height = Math.max(1, Math.round(dimensions.height * scale));
   const horizontalOffset =
@@ -1082,12 +1274,18 @@ function fitMediaIntoStudioElement(
     y,
     filters(inputLabel: string, output: string) {
       const scaledOutput = `${output}_scaled`;
-      const finish = (filter: string) => {
+      const finish = (filter: string, renderedWidth: number, renderedHeight: number) => {
         const rotation = rotationRadians(element.rotation);
         if (!rotation) return [`${filter}[${output}]`];
+        const paddedOutput = `${output}_padded`;
+        const rotationCanvas = Math.ceil(
+          Math.sqrt(renderedWidth * renderedWidth + renderedHeight * renderedHeight),
+        );
+
         return [
           `${filter}[${scaledOutput}]`,
-          `[${scaledOutput}]rotate=${rotation}:c=none:ow=rotw(iw):oh=roth(ih)[${output}]`,
+          `[${scaledOutput}]pad=${rotationCanvas}:${rotationCanvas}:(ow-iw)/2:(oh-ih)/2:color=black@0[${paddedOutput}]`,
+          `[${paddedOutput}]rotate=${rotation}:c=none:ow=iw:oh=ih[${output}]`,
         ];
       };
 
@@ -1107,11 +1305,15 @@ function fitMediaIntoStudioElement(
 
         return finish(
           `${inputLabel}scale=${Math.round(box.width)}:${Math.round(box.height)}:force_original_aspect_ratio=increase,crop=${Math.round(box.width)}:${Math.round(box.height)}:${cropX}:${cropY},setsar=1,format=rgba`,
+          Math.round(box.width),
+          Math.round(box.height),
         );
       }
 
       return finish(
         `${inputLabel}scale=${width}:${height}:force_original_aspect_ratio=decrease,setsar=1,format=rgba`,
+        width,
+        height,
       );
     },
   };
@@ -1510,6 +1712,198 @@ function parseRenderOptions(value: string | null): RenderOptions {
   }
 }
 
+function sceneVideoHookTimeline(options: RenderOptions) {
+  const scenes = Array.isArray(options.sceneVideoPost?.scenes)
+    ? options.sceneVideoPost?.scenes ?? []
+    : [];
+  let cursor = 0;
+
+  return scenes
+    .map((scene, index) => {
+      const text =
+        scene.assets?.hook?.text?.trim() ??
+        scene.assets?.hook?.label?.trim() ??
+        "";
+      const duration = clampNumber(scene.durationSeconds ?? undefined, 0.1, 60, 4);
+      const timing = {
+        sceneId: scene.sceneId ?? null,
+        sceneIndex: index,
+        text,
+        startSeconds: cursor,
+        endSeconds: cursor + duration,
+      };
+      cursor += duration;
+      return timing;
+    })
+    .filter((scene) => Boolean(scene.text));
+}
+
+function sceneAssetText(asset: { text?: string | null; label?: string | null } | null | undefined) {
+  return asset?.text?.trim() || asset?.label?.trim() || "";
+}
+
+function sceneVideoTextTimeline(options: RenderOptions) {
+  const scenes = Array.isArray(options.sceneVideoPost?.scenes)
+    ? options.sceneVideoPost?.scenes ?? []
+    : [];
+  let cursor = 0;
+  const entries: Array<{
+    sceneId: string | null;
+    sceneIndex: number;
+    type: "hook" | "title" | "keywords" | "tropes" | "cta";
+    text: string;
+    startSeconds: number;
+    endSeconds: number;
+  }> = [];
+
+  scenes.forEach((scene, sceneIndex) => {
+    const duration = clampNumber(scene.durationSeconds ?? undefined, 0.1, 60, 4);
+    const startSeconds = cursor;
+    const endSeconds = cursor + duration;
+    const keywords = (scene.assets?.keywords ?? [])
+      .map((asset) => sceneAssetText(asset))
+      .filter(Boolean)
+      .join(" • ");
+    const tropes = (scene.assets?.tropes ?? [])
+      .map((asset) => sceneAssetText(asset))
+      .filter(Boolean)
+      .join(" • ");
+    const textByType = {
+      hook: sceneAssetText(scene.assets?.hook),
+      title: scene.metadataTemplateId
+        ? normaliseRenderedMetadataLine(scene.renderedMetadataLine?.trim() ?? "")
+        : "",
+      keywords,
+      tropes,
+      cta: sceneAssetText(scene.assets?.cta),
+    };
+
+    (["hook", "title", "keywords", "tropes", "cta"] as const).forEach((type) => {
+      const text = textByType[type]?.trim();
+      if (!text) return;
+      entries.push({
+        sceneId: scene.sceneId ?? null,
+        sceneIndex,
+        type,
+        text,
+        startSeconds,
+        endSeconds,
+      });
+    });
+
+    cursor = endSeconds;
+  });
+
+  return entries;
+}
+
+function sceneAssetFilepath(asset: { filepath?: string | null } | null | undefined) {
+  return asset?.filepath?.trim() ?? "";
+}
+
+function sceneMediaForElement(
+  scene: NonNullable<NonNullable<RenderOptions["sceneVideoPost"]>["scenes"]>[number],
+  elementType: string | null | undefined,
+) {
+  if (elementType === "screenshot") return scene.assets?.screenshot ?? null;
+  if (elementType === "image" || elementType === "cover") {
+    return scene.assets?.image ?? scene.assets?.screenshot ?? null;
+  }
+  return null;
+}
+
+function isLayoutStudioMediaElement(element: LayoutStudioElement) {
+  return ["screenshot", "image", "cover"].includes(element.type ?? "");
+}
+
+function sceneVideoVisualTimeline(options: RenderOptions) {
+  const scenes = Array.isArray(options.sceneVideoPost?.scenes)
+    ? options.sceneVideoPost?.scenes ?? []
+    : [];
+  const template = layoutStudioTemplate(options);
+  let cursor = 0;
+  const entries: Array<{
+    element?: LayoutStudioResolvedElement | null;
+    filepath: string;
+    startSeconds: number;
+    endSeconds: number;
+  }> = [];
+
+  scenes.forEach((scene, sceneIndex) => {
+    const duration = clampNumber(scene.durationSeconds ?? undefined, 0.1, 60, 4);
+    const startSeconds = cursor;
+    const endSeconds = cursor + duration;
+    const mediaElements = layoutStudioSceneElements(template, scene.sceneId, sceneIndex)
+      .filter(isLayoutStudioMediaElement)
+      .map(resolveLayoutStudioElementBox)
+      .filter((element): element is LayoutStudioResolvedElement => Boolean(element));
+    const backgroundFilepath = sceneAssetFilepath(scene.assets?.background);
+
+    if (backgroundFilepath) {
+      entries.push({
+        element: null,
+        filepath: backgroundFilepath,
+        startSeconds: cursor,
+        endSeconds,
+      });
+    }
+
+    if (mediaElements.length > 0) {
+      for (const element of mediaElements) {
+        const filepath = sceneAssetFilepath(sceneMediaForElement(scene, element.type));
+        if (!filepath) continue;
+        entries.push({
+          element,
+          filepath,
+          startSeconds,
+          endSeconds,
+        });
+      }
+    } else if (!backgroundFilepath) {
+      const fallbackFilepath =
+        sceneAssetFilepath(scene.assets?.image) ||
+        sceneAssetFilepath(scene.assets?.screenshot);
+      if (fallbackFilepath) {
+        entries.push({
+          element: null,
+          filepath: fallbackFilepath,
+          startSeconds,
+          endSeconds,
+        });
+      }
+    }
+
+    cursor = endSeconds;
+  });
+
+  return entries;
+}
+
+function layoutStudioSceneElements(
+  template: CanvasLayoutTemplate | null,
+  sceneId: string | null | undefined,
+  sceneIndex: number,
+) {
+  const scenes = Array.isArray(template?.scenes) ? template?.scenes ?? [] : [];
+  const scene =
+    (sceneId ? scenes.find((candidate) => candidate.id === sceneId) : null) ??
+    scenes[sceneIndex] ??
+    null;
+
+  return Array.isArray(scene?.elements) ? scene.elements : [];
+}
+
+function resolveLayoutStudioSceneTextElement(
+  template: CanvasLayoutTemplate | null,
+  sceneId: string | null | undefined,
+  sceneIndex: number,
+  type: string,
+) {
+  const element = layoutStudioSceneElements(template, sceneId, sceneIndex)
+    .find((candidate) => candidate.type === type);
+  return element ? resolveLayoutStudioElementBox(element) : null;
+}
+
 function customCanvasTemplate(options: RenderOptions): CanvasLayoutTemplate | null {
   const template = options.layoutTemplateJson;
 
@@ -1870,11 +2264,17 @@ export async function renderJob(jobId: string) {
   const isCoverLayout =
     layoutTemplate === "left_cover_center_screenshot" ||
     layoutTemplate === "left_cover_offset_screenshot";
-  const multiHookTexts = Array.isArray(renderOptions.multiHookTexts)
+  const sceneHookTimeline = sceneVideoHookTimeline(renderOptions);
+  const sceneTextTimeline = sceneVideoTextTimeline(renderOptions);
+  const sceneVisualTimeline = sceneVideoVisualTimeline(renderOptions);
+  const multiHookTexts = sceneHookTimeline.length > 0
+    ? sceneHookTimeline.map((scene) => scene.text)
+    : Array.isArray(renderOptions.multiHookTexts)
     ? renderOptions.multiHookTexts.filter((text) => Boolean(text?.trim()))
     : [];
   const isFullBackgroundMultiHook =
-    renderOptions.layoutTemplate === "booktok_full_background_multi_hook" &&
+    (renderOptions.layoutTemplate === "booktok_full_background_multi_hook" ||
+      sceneHookTimeline.length > 0) &&
     multiHookTexts.length > 0;
   const rawRequestedRenderDuration =
     renderOptions.durationSeconds ??
@@ -1887,6 +2287,12 @@ export async function renderJob(jobId: string) {
     () => null,
   );
   const backgroundIsStillImage = isStillImageFile(job.background_filepath);
+  const backgroundColorMetadata = backgroundIsStillImage
+    ? null
+    : await getVideoColorMetadata(job.background_filepath).catch((error) => {
+        console.warn("Could not read background color metadata:", commandErrorMessage(error));
+        return null;
+      });
   const playbackSpeed = clampNumber(renderOptions.playbackSpeed, 0.95, 1.05, 1);
   const audioStartOffset = Math.max(0, job.audio_start_offset_seconds ?? 0);
   const availableAudioDuration =
@@ -1911,7 +2317,7 @@ export async function renderJob(jobId: string) {
     availableAudioDuration === null
       ? requestedRenderDuration
       : Math.min(requestedRenderDuration, availableAudioDuration);
-  let renderDuration = audioLimitedRenderDuration;
+  const renderDuration = audioLimitedRenderDuration;
   let studioMainStartSeconds = studioTemplate ? studioTimelineDurations.introDuration : 0;
   let studioMainDuration = studioTemplate ? studioTimelineDurations.mainDuration : renderDuration;
   let studioOutroDuration = studioTemplate ? studioTimelineDurations.outroDuration : 0;
@@ -1979,18 +2385,52 @@ export async function renderJob(jobId: string) {
         layoutTemplate,
         customHookBox,
       );
-  const timedHookOverlays = isFullBackgroundMultiHook
-    ? await Promise.all(
-        multiHookTexts.map((hookText, index) =>
-          createHookOverlayImage(
+  const timedHookOverlayEntries = isFullBackgroundMultiHook
+    ? (await Promise.all(
+        sceneTextTimeline.map(async (textTiming, index) => {
+          const sceneHookElement = resolveLayoutStudioSceneTextElement(
+            renderOptions.layoutTemplateJson ?? null,
+            textTiming.sceneId,
+            textTiming.sceneIndex,
+            textTiming.type,
+          );
+
+          if (sceneHookElement) {
+            const overlay = await createLayoutStudioTextOverlay({
+              campaignId: job.campaign_id,
+              element: sceneHookElement,
+              index,
+              jobId: job.id,
+              text: textTiming.text,
+            });
+
+            return {
+              overlay: {
+                ...overlay,
+                element: sceneHookElement,
+              },
+              timing: textTiming,
+            };
+          }
+
+          if (textTiming.type !== "hook") {
+            return null;
+          }
+
+          const overlay = await createHookOverlayImage(
             job.campaign_id,
             job.id,
-            hookText,
-            `hook-${index}`,
+            textTiming.text,
+            `${textTiming.type}-${index}`,
             layoutTemplate,
-          ),
-        ),
-      )
+          );
+
+          return {
+            overlay,
+            timing: textTiming,
+          };
+        }),
+      )).filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
     : [];
   const postCopyOverlays = await createPostCopyOverlays({
     campaignId: job.campaign_id,
@@ -2010,7 +2450,7 @@ export async function renderJob(jobId: string) {
     96;
   const timedHookHeight = Math.max(
     0,
-    ...timedHookOverlays.map((overlay) => overlay.height),
+    ...timedHookOverlayEntries.map((entry) => entry.overlay.height),
   );
   const layout = hookOverlay
     ? calculateLayout({
@@ -2060,14 +2500,15 @@ export async function renderJob(jobId: string) {
 
   const timedHookOverlayInputs: HookOverlayInput[] = [];
 
-  if (timedHookOverlays.length > 0) {
-    timedHookOverlays.forEach((overlay, index) => {
+  if (timedHookOverlayEntries.length > 0) {
+    timedHookOverlayEntries.forEach(({ overlay, timing }) => {
       args.push("-loop", "1", "-i", overlay.filepath);
       timedHookOverlayInputs.push({
+        element: "element" in overlay ? overlay.element : null,
         inputIndex: nextInputIndex,
         height: overlay.height,
-        startSeconds: index * 3,
-        endSeconds: (index + 1) * 3,
+        startSeconds: timing.startSeconds,
+        endSeconds: timing.endSeconds,
       });
       nextInputIndex += 1;
     });
@@ -2140,6 +2581,32 @@ export async function renderJob(jobId: string) {
     });
   }
 
+  const sceneVisualOverlayInputs: SceneVisualOverlayInput[] = [];
+
+  for (const sceneVisual of sceneVisualTimeline) {
+    if (!(await fileExists(sceneVisual.filepath))) continue;
+    const dimensions = await getMediaDimensions(sceneVisual.filepath).catch(() => ({
+      width: canvasWidth,
+      height: canvasHeight,
+    }));
+
+    if (isStillImageFile(sceneVisual.filepath)) {
+      args.push("-loop", "1");
+    }
+
+    args.push("-i", sceneVisual.filepath);
+    sceneVisualOverlayInputs.push({
+      element: sceneVisual.element ?? null,
+      inputIndex: nextInputIndex,
+      height: dimensions.height,
+      filepath: sceneVisual.filepath,
+      width: dimensions.width,
+      startSeconds: sceneVisual.startSeconds,
+      endSeconds: sceneVisual.endSeconds,
+    });
+    nextInputIndex += 1;
+  }
+
   const audioInputIndex = job.audio_filepath ? nextInputIndex : null;
 
   if (job.audio_filepath) {
@@ -2149,7 +2616,9 @@ export async function renderJob(jobId: string) {
     args.push("-i", job.audio_filepath);
   }
 
+  const composedOutputLabel = "vcomposed";
   const mainFilterComplex = buildImageTextFilterComplex({
+    backgroundColorMetadata,
     layout:
       layout ?? {
         hookY: safeTop,
@@ -2162,6 +2631,7 @@ export async function renderJob(jobId: string) {
     screenshotDimensions,
     hookOverlayInputIndex,
     hookOverlays: timedHookOverlayInputs,
+    sceneVisualOverlays: sceneVisualOverlayInputs,
     coverOverlay:
       hasCoverOverlay && coverInputIndex !== null && job.thumbnail_filepath
         ? {
@@ -2210,10 +2680,13 @@ export async function renderJob(jobId: string) {
               : null,
         }
       : undefined,
-    outputLabel: "vout",
+    outputLabel: composedOutputLabel,
   });
 
-  const filterComplex = mainFilterComplex;
+  const filterComplex = [
+    mainFilterComplex,
+    `[${composedOutputLabel}]scale=${canvasWidth}:${canvasHeight}:flags=lanczos:in_range=${outputColorRange}:out_range=${outputColorRange}:out_color_matrix=${outputColorSpace},setsar=1,format=yuv420p[vout]`,
+  ].join(";");
 
   args.push(
     "-filter_complex",
@@ -2243,7 +2716,7 @@ export async function renderJob(jobId: string) {
   args.push(
     "-r",
     String(outputFps),
-    "-fps_mode",
+    "-vsync",
     "cfr",
     "-c:v",
     "libx264",
@@ -2262,11 +2735,13 @@ export async function renderJob(jobId: string) {
     "-pix_fmt",
     "yuv420p",
     "-colorspace",
-    "bt709",
+    outputColorSpace,
     "-color_primaries",
-    "bt709",
+    outputColorSpace,
     "-color_trc",
-    "bt709",
+    outputColorSpace,
+    "-color_range",
+    outputColorRange,
     "-movflags",
     "+faststart",
     outputFilepath,
@@ -2276,6 +2751,8 @@ export async function renderJob(jobId: string) {
     console.log("Render job inputs:", {
       jobId: job.id,
       background: job.background_filepath,
+      backgroundColorMetadata,
+      toneMapBackground: isHdrVideo(backgroundColorMetadata),
       screenshot: preparedScreenshot.filepath,
       originalScreenshot: job.screenshot_filepath,
       screenshotDimensions,
@@ -2285,7 +2762,8 @@ export async function renderJob(jobId: string) {
       renderDurationSeconds,
       thumbnailIntroDuration: null,
       hookOverlay,
-      timedHookOverlays,
+      timedHookOverlays: timedHookOverlayEntries.map((entry) => entry.overlay),
+      sceneVisualOverlayInputs,
       studioTextOverlays,
       layout,
       renderOptions,
@@ -2299,7 +2777,7 @@ export async function renderJob(jobId: string) {
 
     console.log("FFmpeg args:", args.join(" "));
 
-    await runCommand("ffmpeg", args, { all: true });
+    await runCommand(ffmpegBinary, args, { all: true });
 
     const [outputStat, outputDuration] = await Promise.all([
       fs.stat(outputFilepath),
@@ -2336,7 +2814,7 @@ export async function renderJob(jobId: string) {
     }
     await Promise.all(
       [
-        ...timedHookOverlays.map((overlay) => overlay.filepath),
+        ...timedHookOverlayEntries.map((entry) => entry.overlay.filepath),
         ...studioTextOverlays.map((overlay) => overlay.filepath),
       ].map((filepath) => fs.rm(filepath, { force: true })),
     );
