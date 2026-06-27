@@ -84,6 +84,9 @@ const client = new ConvexHttpClient(convexUrl);
 const requiredWorkerSecret = workerSecret;
 let lastTickAt: string | null = null;
 let lastClaimedJobId: string | null = null;
+const convexErrorMessageLimit = 1_200;
+const convexErrorListLimit = 50;
+const sourceDownloadAttempts = 3;
 
 type ClaimedJob = {
   job: {
@@ -101,6 +104,88 @@ type RenderTaskRequest = {
   productionJobId?: string;
   idempotencyKey?: string;
 };
+
+function compactText(value: string, limit = convexErrorMessageLimit) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, Math.max(0, limit - 12)).trimEnd()}... [truncated]`;
+}
+
+function compactErrorMessage(error: unknown) {
+  return compactText(
+    error instanceof Error ? error.message : "Unknown render failure.",
+  );
+}
+
+function compactErrorList(errors: string[]) {
+  return errors.slice(0, convexErrorListLimit).map((error) => compactText(error));
+}
+
+function shouldRetryStatus(status: number) {
+  return (
+    status === 408 ||
+    status === 409 ||
+    status === 425 ||
+    status === 429 ||
+    status >= 500
+  );
+}
+
+function retryDelayMs(attempt: number) {
+  return Math.min(4_000, 500 * 2 ** Math.max(0, attempt - 1));
+}
+
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithRetries(
+  url: string,
+  init: RequestInit,
+  context: string,
+) {
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= sourceDownloadAttempts; attempt += 1) {
+    try {
+      const response = await fetch(url, init);
+
+      if (
+        response.ok ||
+        !shouldRetryStatus(response.status) ||
+        attempt === sourceDownloadAttempts
+      ) {
+        return response;
+      }
+
+      const body = await response.text().catch(() => "");
+      lastError = new Error(
+        `${context}: ${response.status} ${response.statusText} ${body.slice(0, 300)}`,
+      );
+      console.warn(
+        `${context} attempt ${attempt}/${sourceDownloadAttempts} returned ${response.status}; retrying.`,
+      );
+    } catch (error) {
+      lastError = error;
+
+      if (attempt === sourceDownloadAttempts) {
+        throw error;
+      }
+
+      console.warn(
+        `${context} attempt ${attempt}/${sourceDownloadAttempts} failed: ${compactErrorMessage(error)}; retrying.`,
+      );
+    }
+
+    await sleep(retryDelayMs(attempt));
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(`${context} failed.`);
+}
 
 type RenderAssetRef = {
   assetId: string;
@@ -684,7 +769,11 @@ async function downloadStorageObjectFromBucket(
   )}/o/${encodeURIComponent(objectName)}?alt=media`;
   const auth = getGoogleServiceAccountAuth({ impersonateWorkspace: false });
   const headers = await auth.getRequestHeaders(url);
-  const response = await fetch(url, { headers: headers as HeadersInit });
+  const response = await fetchWithRetries(
+    url,
+    { headers: headers as HeadersInit },
+    `Download Cloud Storage render source ${objectName}`,
+  );
 
   if (!response.ok) {
     const body = await response.text().catch(() => "");
@@ -811,9 +900,13 @@ async function ensureSourceFileDownloaded(input: {
     if (previewObjectName) {
       await downloadPreviewObjectFromStorage(previewObjectName, filepath);
     } else {
-      const response = await fetch(sourceUrl, {
-        headers: sourceRequestHeaders(sourceUrl),
-      });
+      const response = await fetchWithRetries(
+        sourceUrl,
+        {
+          headers: sourceRequestHeaders(sourceUrl),
+        },
+        `Download source asset ${sourceUrl}`,
+      );
       if (!response.ok) {
         const body = await response.text().catch(() => "");
         throw new Error(
@@ -1741,17 +1834,21 @@ async function processRenderCampaign(job: ClaimedJob) {
   );
 
   if (validationErrors.length > 0) {
+    const compactValidationErrors = compactErrorList(validationErrors);
+
     await client.mutation(api.productionJobs.fail, {
       jobId: job.job.id,
       workerId,
       workerSecret: requiredWorkerSecret,
-      error: `Render campaign payload failed validation: ${validationErrors
-        .slice(0, 5)
-        .join(" ")}`,
+      error: compactText(
+        `Render campaign payload failed validation: ${compactValidationErrors
+          .slice(0, 5)
+          .join(" ")}`,
+      ),
       errorCode: "INVALID_RENDER_PAYLOAD",
       errorDetails: {
         campaignId: job.campaign?.id ?? input.campaignId ?? null,
-        validationErrors,
+        validationErrors: compactValidationErrors,
       },
       output: {
         summary: {
@@ -1849,8 +1946,7 @@ async function processRenderCampaign(job: ClaimedJob) {
         `Output written to GCS for ${video.videoOutputId}: ${stagedPreview.previewUrl}.`,
       );
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unknown render failure.";
+      const message = compactErrorMessage(error);
       const finishedAt = new Date().toISOString();
 
       errors.push(`${video.videoOutputId}: ${message}`);
@@ -1884,7 +1980,7 @@ async function processRenderCampaign(job: ClaimedJob) {
         failed,
       },
       videos: results,
-      errors,
+      errors: compactErrorList(errors),
     },
   });
   const reportResult = report as { success?: boolean; message?: string };
@@ -1936,8 +2032,7 @@ async function processJob(job: ClaimedJob) {
 
     await processRenderCampaign(job);
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Unknown render campaign failure.";
+    const message = compactErrorMessage(error);
 
     await client.mutation(api.productionJobs.fail, {
       jobId: job.job.id,
