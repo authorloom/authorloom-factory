@@ -63,6 +63,10 @@ const scalerMaxInstances = Math.max(
   1,
   Number(process.env.AUTHORLOOM_SCALER_MAX_INSTANCES ?? 28),
 );
+const scalerTargetJobsPerInstance = Math.max(
+  1,
+  Number(process.env.AUTHORLOOM_SCALER_TARGET_JOBS_PER_INSTANCE ?? 2),
+);
 const taskSecret = process.env.AUTHORLOOM_TASK_SECRET?.trim();
 let healthServer: http.Server | null = null;
 
@@ -158,6 +162,7 @@ type RenderInstruction = {
     layoutTemplateId?: string | null;
     layoutTemplateJson?: unknown;
     layoutStudioAssets?: unknown;
+    timelineVideoPost?: unknown;
     multiHookTexts?: string[] | null;
     postCopy?: {
       caption?: string | null;
@@ -257,16 +262,10 @@ function renderCampaignInput(input: unknown): RenderCampaignInput {
 
 function targetInstancesForQueueDepth(activeJobs: number) {
   if (activeJobs <= 0) return 1;
-  if (activeJobs <= 20) return 2;
-  if (activeJobs <= 80) return 4;
-  if (activeJobs <= 200) return 6;
-  if (activeJobs <= 400) return 8;
-  if (activeJobs <= 600) return 10;
-  if (activeJobs <= 800) return 12;
-  if (activeJobs <= 1_000) return 14;
-  if (activeJobs <= 2_000) return 17;
-  if (activeJobs <= 5_000) return 20;
-  return 28;
+  return Math.min(
+    scalerMaxInstances,
+    Math.max(1, Math.ceil(activeJobs / scalerTargetJobsPerInstance)),
+  );
 }
 
 async function cloudRunAccessToken() {
@@ -728,11 +727,15 @@ async function uploadRenderedPreviewToStorage(input: {
   const auth = getGoogleServiceAccountAuth({ impersonateWorkspace: false });
   const mediaHeaders = await auth.getRequestHeaders(mediaUrl);
   const buffer = await fs.readFile(input.filepath);
+  const contentType =
+    path.extname(input.filepath).toLowerCase() === ".zip"
+      ? "application/zip"
+      : "video/mp4";
   const mediaResponse = await fetch(mediaUrl, {
     method: "POST",
     headers: {
       ...authHeadersToRecord(mediaHeaders),
-      "content-type": "video/mp4",
+      "content-type": contentType,
       "content-length": String(buffer.length),
     },
     body: new Uint8Array(buffer),
@@ -1352,7 +1355,7 @@ function normalizeSceneRenderOptions(
 
   return {
     ...renderOptions,
-    postType: "scenes_video_post" as const,
+    postType: postType ?? renderOptions.postType ?? "scenes_video_post",
     layoutTemplate: "booktok_full_background_multi_hook",
     multiHookTexts: sceneHookTexts.length > 0
       ? sceneHookTexts
@@ -1458,6 +1461,10 @@ async function prepareLocalRenderJob(input: {
     sceneVideoPost: input.video.renderOptions?.sceneVideoPost,
     localBookId: input.localBookId,
   });
+  const timelineVideoPost = await prepareTimelineVideoPostAssets({
+    timelineVideoPost: input.video.renderOptions?.timelineVideoPost,
+    localBookId: input.localBookId,
+  });
   const screenshotId = ensureBookScreenshot({
     bookId: input.localBookId,
     asset: input.video.assets.screenshot,
@@ -1497,6 +1504,7 @@ async function prepareLocalRenderJob(input: {
         ...(input.video.renderOptions ?? {}),
         postType: input.video.postType ?? null,
         sceneVideoPost,
+        timelineVideoPost,
         layoutStudioAssets: {
           ...(
             input.video.renderOptions?.layoutStudioAssets &&
@@ -1517,6 +1525,77 @@ async function prepareLocalRenderJob(input: {
     audioId,
     thumbnailId,
   });
+}
+
+async function prepareTimelineVideoPostAssets(input: {
+  timelineVideoPost: unknown;
+  localBookId: string;
+}) {
+  if (!input.timelineVideoPost || typeof input.timelineVideoPost !== "object") {
+    return input.timelineVideoPost ?? null;
+  }
+
+  const timelineVideoPost = input.timelineVideoPost as Record<string, unknown>;
+  const resolvedClips = Array.isArray(timelineVideoPost.resolvedClips)
+    ? timelineVideoPost.resolvedClips
+    : null;
+
+  if (!resolvedClips) {
+    return timelineVideoPost;
+  }
+
+  return {
+    ...timelineVideoPost,
+    resolvedClips: await Promise.all(
+      resolvedClips.map(async (clip) => {
+        if (!clip || typeof clip !== "object") return clip;
+        const clipRecord = clip as Record<string, unknown>;
+        const asset = clipRecord.asset && typeof clipRecord.asset === "object"
+          ? clipRecord.asset as RenderAssetRef
+          : null;
+
+        if (!asset) return clipRecord;
+
+        const sourceUrl =
+          resolveSourceUrl(asset.renderSourceUrl) ??
+          resolveSourceUrl(asset.previewUrl) ??
+          resolveSourceUrl(asset.audioUrl) ??
+          null;
+        const isTextAsset = ["hook", "cta", "keyword", "trope", "metadata"].includes(asset.type);
+
+        if (isTextAsset && !sourceUrl) {
+          return {
+            ...clipRecord,
+            asset,
+          };
+        }
+
+        const extension =
+          path.extname(asset.filename ?? "") ||
+          (asset.renderSourceMimeType?.includes("video") ? ".mp4" : ".jpg");
+        const directory = ["background", "backgroundImage"].includes(asset.type)
+          ? path.join(paths.backgroundsDirectory, input.localBookId)
+          : ["cover", "coverImage", "thumbnail"].includes(asset.type)
+            ? path.join(paths.thumbnailsDirectory, input.localBookId)
+            : path.join(paths.screenshotsDirectory, input.localBookId);
+        const filepath = await ensureSourceFileDownloaded({
+          asset,
+          sourceUrl,
+          filename: sourceUrl ? `${asset.assetId}${extension}` : asset.filename,
+          directory,
+          fallbackFilename: `${asset.assetId}${extension}`,
+        });
+
+        return {
+          ...clipRecord,
+          asset: {
+            ...asset,
+            filepath,
+          },
+        };
+      }),
+    ),
+  };
 }
 
 async function prepareSceneVideoPostAssets(input: {
@@ -1623,6 +1702,9 @@ function fallbackExtensionForAsset(asset: RenderAssetRef) {
   if (mimeType.includes("webp")) return ".webp";
   if (mimeType.includes("jpeg") || mimeType.includes("jpg")) return ".jpg";
   if (mimeType.includes("mp4")) return ".mp4";
+  if (mimeType.includes("quicktime") || mimeType.includes("mov")) return ".mov";
+  if (mimeType.includes("x-m4v") || mimeType.includes("m4v")) return ".m4v";
+  if (mimeType.includes("webm")) return ".webm";
   if (asset.type === "background") return ".mp4";
   return ".jpg";
 }
@@ -1729,11 +1811,13 @@ async function processRenderCampaign(job: ClaimedJob) {
         throw new Error("Render completed but no local output file was recorded.");
       }
 
+      const effectiveOutputFilename =
+        renderedJob.output_filename ?? video.outputFilename ?? null;
       const stagedPreview = await uploadRenderedPreviewToStorage({
         filepath: renderedJob.output_filepath,
         campaignId: job.campaign?.id ?? input.campaignId ?? null,
         videoOutputId: video.videoOutputId,
-        outputFilename: video.outputFilename ?? renderedJob.output_filename,
+        outputFilename: effectiveOutputFilename,
       });
       console.log(
         `Staged rendered output for ${video.videoOutputId}: ${stagedPreview.previewUrl}.`,
@@ -1749,7 +1833,7 @@ async function processRenderCampaign(job: ClaimedJob) {
         driveUrl: null,
         stagedPreviewObjectName: stagedPreview.objectName,
         stagedPreviewUrl: stagedPreview.previewUrl,
-        outputFilename: video.outputFilename ?? renderedJob.output_filename ?? null,
+        outputFilename: effectiveOutputFilename,
         durationSeconds: null,
         startedAt,
         finishedAt,

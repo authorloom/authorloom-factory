@@ -19,6 +19,7 @@
     "authorloom:worker:once": "tsx scripts/authorloom-production-worker.ts --once",
     "render:test": "tsx scripts/render-test.ts",
     "google:auth": "tsx scripts/google-auth.ts",
+    "emoji:sync-noto": "node scripts/sync-noto-emoji-assets.mjs",
     "upload:drive-worker": "tsx scripts/upload-drive-videos-worker.ts",
     "storage:cleanup": "tsx scripts/cleanup-render-storage.ts --execute",
     "storage:cleanup:dry-run": "tsx scripts/cleanup-render-storage.ts"

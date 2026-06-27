@@ -1,6 +1,7 @@
-import { createWriteStream } from "node:fs";
+import fsSync, { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
+import { fileURLToPath } from "node:url";
 import React from "react";
 import { unstable_createNodejsStream } from "../node_modules/next/dist/compiled/@vercel/og/index.node.js";
 
@@ -91,24 +92,81 @@ const strokeWidth =
       : config.shadowPreset === "reduced"
         ? 4
         : 5;
-const textShadow =
+const presetTextShadow =
   config.shadowPreset === "copy"
     ? copyTextShadow
     : config.shadowPreset === "subtle"
     ? subtleTextShadow
     : config.shadowPreset === "reduced"
       ? reducedTextShadow
-      : hookTextShadow;
+      : config.shadowPreset === "default"
+        ? hookTextShadow
+        : undefined;
+const textShadow = config.textShadow ?? presetTextShadow;
 
 const emojiShadow = "0 1px 3px rgba(0,0,0,0.16)";
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const emojiPattern = /\p{Emoji}/u;
-const emojiStyle = config.emojiStyle ?? process.env.AUTHORLOOM_EMOJI_STYLE ?? "noto";
+const fallbackEmojiStyle = "noto";
+const useNotoEmojiAssets = config.useNotoEmojiAssets !== false;
+const notoEmojiAssetsDirectory = new URL("../public/emoji/noto/svg/", import.meta.url);
+const notoEmojiAssetCache = new Map();
+const variationSelectorCodepoints = new Set([0xfe0e, 0xfe0f]);
 
 function cleanStyle(style) {
   return Object.fromEntries(
-    Object.entries(style).filter(([, value]) => value !== undefined),
+    Object.entries(style).filter(([, value]) => value !== undefined && value !== null),
   );
+}
+
+function emojiCodepoints(segment, { stripVariationSelectors = false } = {}) {
+  return Array.from(segment)
+    .map((character) => character.codePointAt(0))
+    .filter((codepoint) => {
+      if (!stripVariationSelectors) {
+        return true;
+      }
+
+      return !variationSelectorCodepoints.has(codepoint);
+    })
+    .map((codepoint) => codepoint.toString(16).padStart(codepoint <= 0xffff ? 4 : 0, "0"))
+    .join("_");
+}
+
+function notoEmojiAssetCandidates(segment) {
+  return [
+    `emoji_u${emojiCodepoints(segment)}.svg`,
+    `emoji_u${emojiCodepoints(segment, { stripVariationSelectors: true })}.svg`,
+  ].filter(
+    (candidate, index, candidates) =>
+      candidate !== "emoji_u.svg" && candidates.indexOf(candidate) === index,
+  );
+}
+
+function getNotoEmojiDataUri(segment) {
+  if (!useNotoEmojiAssets) {
+    return null;
+  }
+
+  if (notoEmojiAssetCache.has(segment)) {
+    return notoEmojiAssetCache.get(segment);
+  }
+
+  for (const candidate of notoEmojiAssetCandidates(segment)) {
+    const filepath = fileURLToPath(new URL(candidate, notoEmojiAssetsDirectory));
+
+    if (!fsSync.existsSync(filepath)) {
+      continue;
+    }
+
+    const svg = fsSync.readFileSync(filepath);
+    const dataUri = `data:image/svg+xml;base64,${svg.toString("base64")}`;
+    notoEmojiAssetCache.set(segment, dataUri);
+    return dataUri;
+  }
+
+  notoEmojiAssetCache.set(segment, null);
+  return null;
 }
 
 function splitEmojiRuns(text) {
@@ -117,11 +175,22 @@ function splitEmojiRuns(text) {
 
   for (const { segment } of graphemeSegmenter.segment(text)) {
     if (emojiPattern.test(segment)) {
+      const emojiSrc = getNotoEmojiDataUri(segment);
+
+      if (!emojiSrc && /^[0-9#*]$/.test(segment)) {
+        textRun += segment;
+        continue;
+      }
+
       if (textRun) {
         runs.push({ type: "text", value: textRun });
         textRun = "";
       }
-      runs.push({ type: "emoji", value: segment });
+      runs.push(
+        emojiSrc
+          ? { type: "emojiAsset", src: emojiSrc, value: segment }
+          : { type: "emoji", value: segment },
+      );
     } else {
       textRun += segment;
     }
@@ -152,29 +221,46 @@ function renderLine(line, lineIndex) {
             flexDirection: "row",
           },
     },
-    splitEmojiRuns(line).map((run, runIndex) =>
-      React.createElement(
+    splitEmojiRuns(line).map((run, runIndex) => {
+      if (run.type === "emojiAsset") {
+        return React.createElement("img", {
+          key: `run-${lineIndex}-${runIndex}`,
+          alt: run.value,
+          src: run.src,
+          style: cleanStyle({
+            display: "flex",
+            height: Math.round(fontSize * 1.05),
+            marginLeft: Math.max(1, Math.round(fontSize * 0.04)),
+            marginRight: Math.max(1, Math.round(fontSize * 0.04)),
+            objectFit: "contain",
+            transform: `translateY(${Math.round(fontSize * 0.08)}px)`,
+            width: Math.round(fontSize * 1.05),
+          }),
+        });
+      }
+
+      return React.createElement(
         "span",
         {
           key: `run-${lineIndex}-${runIndex}`,
           style:
             run.type === "emoji"
-              ? {
+              ? cleanStyle({
                   fontSize: Math.round(fontSize * 1.03),
                   lineHeight: 1,
                   padding: "0 0.02em",
                   textShadow: emojiShadow,
-                }
-              : {
+                })
+              : cleanStyle({
                   WebkitTextStrokeColor: config.outlineColor ?? "rgba(0,0,0,0.98)",
                   WebkitTextStrokeWidth: strokeWidth,
                   paintOrder: "stroke fill",
                   textShadow,
-                },
+                }),
         },
         run.value,
-      ),
-    ),
+      );
+    }),
   );
 
   return React.createElement(
@@ -242,7 +328,7 @@ const imageStream = await unstable_createNodejsStream(
   {
     width: Number(config.width),
     height: Number(config.height),
-    emoji: emojiStyle,
+    emoji: fallbackEmojiStyle,
     fonts: hookFont
       ? [
           {
