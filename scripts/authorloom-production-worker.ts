@@ -20,7 +20,7 @@ import {
   listCampaigns,
   listRenderBatchesByCampaign,
 } from "../src/lib/db";
-import { renderJob } from "../src/lib/ffmpeg";
+import { renderGroupedImagePostJob, renderJob } from "../src/lib/ffmpeg";
 import { env } from "../src/lib/env";
 import { getGoogleServiceAccountAuth } from "../src/lib/google-auth";
 import { paths } from "../src/lib/paths";
@@ -87,6 +87,7 @@ let lastClaimedJobId: string | null = null;
 const convexErrorMessageLimit = 1_200;
 const convexErrorListLimit = 50;
 const sourceDownloadAttempts = 3;
+const renderJobTypes = ["render_campaign_videos", "render_grouped_image_posts"];
 
 type ClaimedJob = {
   job: {
@@ -318,6 +319,34 @@ type RenderCampaignInput = {
   videos?: RenderInstruction[];
 };
 
+type GroupedImagePostInput = {
+  version?: string;
+  productionJobId?: string;
+  campaignId?: string;
+  batchId?: string;
+  outputKind?: "slides" | "carousel";
+  platform?: "tiktok" | "instagram";
+  parentOutputId?: string;
+  jpegQuality?: number;
+  dimensions?: { width?: number; height?: number };
+  layout?: {
+    layoutId?: string;
+    name?: string;
+    templateJson?: unknown;
+  };
+  post?: {
+    outputFilenameBase?: string;
+    captionText?: string;
+    cards?: Array<{
+      index?: number;
+      sceneId?: string;
+      assets?: unknown;
+      elements?: unknown;
+      renderOptions?: unknown;
+    }>;
+  };
+};
+
 type QueueStatsResult = {
   success: boolean;
   message?: string;
@@ -343,6 +372,10 @@ function renderInstructions(input: unknown): RenderInstruction[] {
 
 function renderCampaignInput(input: unknown): RenderCampaignInput {
   return input && typeof input === "object" ? (input as RenderCampaignInput) : {};
+}
+
+function groupedImagePostInput(input: unknown): GroupedImagePostInput {
+  return input && typeof input === "object" ? (input as GroupedImagePostInput) : {};
 }
 
 function targetInstancesForQueueDepth(activeJobs: number) {
@@ -442,7 +475,7 @@ async function patchCloudRunScaling(input: {
 async function runScaleCheck() {
   const stats = (await client.query(api.productionJobs.workerQueueStats, {
     workerSecret: requiredWorkerSecret,
-    types: ["render_campaign_videos"],
+    types: renderJobTypes,
   })) as QueueStatsResult;
 
   if (!stats.success) {
@@ -613,6 +646,78 @@ function positiveNumber(value: unknown) {
 
 function nonNegativeNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function validateGroupedImagePostInput(input: GroupedImagePostInput) {
+  const errors: string[] = [];
+  const templateJson =
+    input.layout?.templateJson && typeof input.layout.templateJson === "object"
+      ? (input.layout.templateJson as { canvas?: { width?: unknown; height?: unknown } })
+      : null;
+  const templateCanvas = templateJson?.canvas;
+
+  if (input.version !== "render_grouped_image_posts.v1") {
+    errors.push("version must be render_grouped_image_posts.v1.");
+  }
+  if (!input.productionJobId?.trim()) errors.push("productionJobId is required.");
+  if (!input.campaignId?.trim()) errors.push("campaignId is required.");
+  if (!input.batchId?.trim()) errors.push("batchId is required.");
+  if (!input.parentOutputId?.trim()) errors.push("parentOutputId is required.");
+  if (input.outputKind !== "slides" && input.outputKind !== "carousel") {
+    errors.push("outputKind must be slides or carousel.");
+  }
+  if (input.platform !== "tiktok" && input.platform !== "instagram") {
+    errors.push("platform must be tiktok or instagram.");
+  }
+  if (input.jpegQuality !== 92) {
+    errors.push("jpegQuality must be 92.");
+  }
+  if (!positiveNumber(input.dimensions?.width)) {
+    errors.push("dimensions.width must be greater than 0.");
+  }
+  if (!positiveNumber(input.dimensions?.height)) {
+    errors.push("dimensions.height must be greater than 0.");
+  }
+  if (
+    input.outputKind === "slides" &&
+    (input.platform !== "tiktok" ||
+      input.dimensions?.width !== 1080 ||
+      input.dimensions?.height !== 1920)
+  ) {
+    errors.push("TikTok slides must use platform tiktok and dimensions 1080x1920.");
+  }
+  if (input.outputKind === "carousel" && input.platform !== "instagram") {
+    errors.push("Instagram carousel jobs must use platform instagram.");
+  }
+  if (
+    input.outputKind === "carousel" &&
+    (templateCanvas?.width !== input.dimensions?.width ||
+      templateCanvas?.height !== input.dimensions?.height)
+  ) {
+    errors.push("Instagram carousel dimensions must match layout.templateJson.canvas.");
+  }
+  if (!input.layout?.layoutId?.trim()) errors.push("layout.layoutId is required.");
+  if (!input.layout || input.layout.templateJson === undefined) {
+    errors.push("layout.templateJson is required.");
+  }
+  const cards = input.post?.cards;
+  if (!Array.isArray(cards) || cards.length === 0) {
+    errors.push("post.cards must include at least one card.");
+  } else {
+    cards.forEach((card, index) => {
+      if (!Number.isInteger(card.index) || (card.index ?? -1) < 0) {
+        errors.push(`post.cards[${index}].index must be a non-negative integer.`);
+      }
+    });
+  }
+
+  return errors;
+}
+
+function groupedImageStatus(doneCount: number, totalCount: number) {
+  if (doneCount === totalCount && totalCount > 0) return "awaiting_review" as const;
+  if (doneCount > 0) return "partial_failed" as const;
+  return "failed" as const;
 }
 
 function safeFilename(value: string | null | undefined, fallback: string) {
@@ -843,6 +948,63 @@ async function uploadRenderedPreviewToStorage(input: {
   return {
     objectName,
     previewUrl: previewPublicUrl(objectName),
+  };
+}
+
+async function uploadRenderedImageToStorage(input: {
+  filepath: string;
+  campaignId: string;
+  batchId: string;
+  parentOutputId: string;
+  filename: string;
+}) {
+  const bucketName = getPreviewBucketName();
+
+  if (!bucketName) {
+    throw new Error(
+      "AUTHORLOOM_PREVIEW_BUCKET or GOOGLE_CLOUD_STORAGE_BUCKET is not configured; rendered image output cannot be staged to GCS.",
+    );
+  }
+
+  const objectName = previewObjectName(
+    [
+      "rendered-images",
+      input.campaignId,
+      input.batchId,
+      input.parentOutputId,
+      safeFilename(input.filename, "01.jpg"),
+    ].join("/"),
+  );
+  const mediaUrl = `https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(
+    bucketName,
+  )}/o?uploadType=media&name=${encodeURIComponent(objectName)}`;
+  const auth = getGoogleServiceAccountAuth({ impersonateWorkspace: false });
+  const mediaHeaders = await auth.getRequestHeaders(mediaUrl);
+  const buffer = await fs.readFile(input.filepath);
+  const mediaResponse = await fetch(mediaUrl, {
+    method: "POST",
+    headers: {
+      ...authHeadersToRecord(mediaHeaders),
+      "content-type": "image/jpeg",
+      "content-length": String(buffer.length),
+    },
+    body: new Uint8Array(buffer),
+  });
+
+  if (!mediaResponse.ok && mediaResponse.status !== 409) {
+    const body = await mediaResponse.text().catch(() => "");
+    throw new Error(
+      `Could not upload rendered image ${objectName} to Cloud Storage: ${mediaResponse.status} ${body.slice(
+        0,
+        300,
+      )}`,
+    );
+  }
+
+  return {
+    objectName,
+    previewUrl: previewPublicUrl(objectName),
+    sizeBytes: buffer.length,
   };
 }
 
@@ -1995,6 +2157,176 @@ async function processRenderCampaign(job: ClaimedJob) {
   );
 }
 
+async function processGroupedImagePosts(job: ClaimedJob) {
+  const input = groupedImagePostInput(job.input);
+  const validationErrors = validateGroupedImagePostInput(input);
+
+  if (validationErrors.length > 0) {
+    const compactValidationErrors = compactErrorList(validationErrors);
+
+    await client.mutation(api.productionJobs.fail, {
+      jobId: job.job.id,
+      workerId,
+      workerSecret: requiredWorkerSecret,
+      error: compactText(
+        `Grouped image payload failed validation: ${compactValidationErrors
+          .slice(0, 5)
+          .join(" ")}`,
+      ),
+      errorCode: "INVALID_GROUPED_IMAGE_PAYLOAD",
+      errorDetails: {
+        campaignId: input.campaignId ?? null,
+        batchId: input.batchId ?? null,
+        parentOutputId: input.parentOutputId ?? null,
+        validationErrors: compactValidationErrors,
+      },
+      output: {
+        version: "render_grouped_image_posts_result.v1",
+        productionJobId: job.job.id,
+        batchId: input.batchId ?? null,
+        parentOutputId: input.parentOutputId ?? null,
+        outputKind: input.outputKind ?? null,
+        status: "failed",
+        files: [],
+        errors: compactValidationErrors,
+      },
+    });
+    return;
+  }
+
+  const campaignId = input.campaignId as string;
+  const batchId = input.batchId as string;
+  const parentOutputId = input.parentOutputId as string;
+  const cards = input.post?.cards ?? [];
+  const preparedSceneVideoPost = await prepareSceneVideoPostAssets({
+    sceneVideoPost: {
+      scenes: cards.map((card) => {
+        const renderOptions =
+          card.renderOptions && typeof card.renderOptions === "object"
+            ? (card.renderOptions as Record<string, unknown>)
+            : {};
+        const sourceScene =
+          renderOptions.scene && typeof renderOptions.scene === "object"
+            ? (renderOptions.scene as Record<string, unknown>)
+            : {};
+
+        return {
+          ...sourceScene,
+          sceneId: card.sceneId ?? sourceScene.sceneId ?? `card-${card.index}`,
+          assets: card.assets ?? sourceScene.assets ?? null,
+        };
+      }),
+    },
+    localBookId: `grouped-${campaignId}`,
+  });
+  const preparedScenes = Array.isArray(
+    (preparedSceneVideoPost as { scenes?: unknown } | null)?.scenes,
+  )
+    ? ((preparedSceneVideoPost as { scenes: Array<{ assets?: unknown }> }).scenes)
+    : [];
+
+  let renderedFiles = await renderGroupedImagePostJob({
+    campaignId,
+    parentOutputId,
+    outputKind: input.outputKind as "slides" | "carousel",
+    jpegQuality: input.jpegQuality,
+    dimensions: {
+      width: input.dimensions?.width as number,
+      height: input.dimensions?.height as number,
+    },
+    layout: {
+      layoutId: input.layout?.layoutId as string,
+      name: input.layout?.name,
+      templateJson: input.layout?.templateJson,
+    },
+    cards: cards.map((card, index) => ({
+      index: card.index as number,
+      sceneId: card.sceneId,
+      assets: preparedScenes[index]?.assets ?? card.assets,
+      elements: card.elements,
+      renderOptions: card.renderOptions,
+    })),
+  });
+
+  renderedFiles = await Promise.all(
+    renderedFiles.map(async (file) => {
+      if (file.status !== "done" || !file.filepath) {
+        return file;
+      }
+
+      try {
+        const stagedPreview = await uploadRenderedImageToStorage({
+          filepath: file.filepath,
+          campaignId,
+          batchId,
+          parentOutputId,
+          filename: file.filename,
+        });
+
+        return {
+          ...file,
+          stagedPreviewObjectName: stagedPreview.objectName,
+          stagedPreviewUrl: stagedPreview.previewUrl,
+          sizeBytes: stagedPreview.sizeBytes,
+        };
+      } catch (error) {
+        return {
+          index: file.index,
+          status: "failed" as const,
+          filename: file.filename,
+          errorMessage: compactErrorMessage(error),
+        };
+      }
+    }),
+  );
+
+  const doneCount = renderedFiles.filter((file) => file.status === "done").length;
+  const status = groupedImageStatus(doneCount, renderedFiles.length);
+  const errors = renderedFiles
+    .filter((file) => file.status === "failed" && file.errorMessage)
+    .map((file) => `Card ${file.index}: ${file.errorMessage}`);
+  const result = {
+    version: "render_grouped_image_posts_result.v1",
+    productionJobId: job.job.id,
+    batchId,
+    parentOutputId,
+    outputKind: input.outputKind as "slides" | "carousel",
+    status,
+    files: renderedFiles.map((file) => ({
+      index: file.index,
+      status: file.status,
+      filename: file.filename,
+      stagedPreviewObjectName:
+        "stagedPreviewObjectName" in file ? file.stagedPreviewObjectName : undefined,
+      stagedPreviewUrl:
+        "stagedPreviewUrl" in file ? file.stagedPreviewUrl : undefined,
+      width: file.width,
+      height: file.height,
+      mimeType: "image/jpeg" as const,
+      sizeBytes: file.sizeBytes,
+      errorMessage: file.errorMessage,
+    })),
+    errors: compactErrorList(errors),
+  };
+
+  const report = await client.mutation(api.productionJobs.reportGroupedImagePostResult, {
+    workerId,
+    workerSecret: requiredWorkerSecret,
+    result,
+  });
+  const reportResult = report as { success?: boolean; message?: string };
+
+  if (reportResult.success === false) {
+    throw new Error(
+      reportResult.message ?? "Convex rejected the grouped image result.",
+    );
+  }
+
+  console.log(
+    `Convex grouped image result mutation succeeded for ${job.job.id}: ${doneCount} rendered, ${renderedFiles.length - doneCount} failed.`,
+  );
+}
+
 async function processJob(job: ClaimedJob) {
   await client.mutation(api.productionJobs.heartbeat, {
     jobId: job.job.id,
@@ -2017,7 +2349,7 @@ async function processJob(job: ClaimedJob) {
   }, 30_000);
 
   try {
-    if (job.job.type !== "render_campaign_videos") {
+    if (!renderJobTypes.includes(job.job.type)) {
       await client.mutation(api.productionJobs.fail, {
         jobId: job.job.id,
         workerId,
@@ -2027,6 +2359,19 @@ async function processJob(job: ClaimedJob) {
         errorDetails: { jobType: job.job.type },
         output: {},
       });
+      return;
+    }
+
+    const inputVersion =
+      job.input && typeof job.input === "object"
+        ? (job.input as { version?: unknown }).version
+        : null;
+
+    if (
+      job.job.type === "render_grouped_image_posts" ||
+      inputVersion === "render_grouped_image_posts.v1"
+    ) {
+      await processGroupedImagePosts(job);
       return;
     }
 
@@ -2059,7 +2404,7 @@ async function tick() {
   const claim = await client.mutation(api.productionJobs.claimNext, {
     workerId,
     workerSecret: requiredWorkerSecret,
-    types: ["render_campaign_videos"],
+    types: renderJobTypes,
   });
 
   const claimResult = claim as {
@@ -2153,7 +2498,7 @@ async function handleRenderTask(
   const claim = await client.mutation(api.productionJobs.claimNext, {
     workerId,
     workerSecret: requiredWorkerSecret,
-    types: ["render_campaign_videos"],
+    types: renderJobTypes,
     idempotencyKey,
   });
   const claimResult = claim as {
