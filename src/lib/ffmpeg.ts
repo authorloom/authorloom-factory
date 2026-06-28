@@ -1234,8 +1234,12 @@ function isLayoutStudioTemplate(template: CanvasLayoutTemplate | null | undefine
   return (
     template?.kind === "layoutStudio" &&
     Array.isArray(template.elements) &&
-    template.canvas?.width === canvasWidth &&
-    template.canvas?.height === canvasHeight
+    typeof template.canvas?.width === "number" &&
+    Number.isFinite(template.canvas.width) &&
+    template.canvas.width > 0 &&
+    typeof template.canvas?.height === "number" &&
+    Number.isFinite(template.canvas.height) &&
+    template.canvas.height > 0
   );
 }
 
@@ -2533,17 +2537,21 @@ async function sceneMediaDimensionsByElementId(input: {
 }
 
 async function renderSlideImage(input: {
-  backgroundFilepath: string;
+  backgroundFilepath?: string | null;
   campaignId: string;
+  dimensions?: MediaDimensions;
   jobId: string;
+  jpegQuality?: number;
   outputFilepath: string;
   renderOptions: RenderOptions;
   scene: NonNullable<NonNullable<RenderOptions["sceneVideoPost"]>["scenes"]>[number];
   sceneIndex: number;
-  screenshotFilepath: string;
+  screenshotFilepath?: string | null;
   screenshotDimensions: MediaDimensions;
   studioTemplate: CanvasLayoutTemplate;
 }) {
+  const outputWidth = input.dimensions?.width ?? canvasWidth;
+  const outputHeight = input.dimensions?.height ?? canvasHeight;
   const rawSceneTemplate = layoutStudioTemplateForScene(
     input.studioTemplate,
     input.scene.sceneId,
@@ -2577,16 +2585,20 @@ async function renderSlideImage(input: {
   );
   const args = ["-y"];
   const sceneBackgroundFilepath =
-    sceneAssetFilepath(input.scene.assets?.background) || input.backgroundFilepath;
+    sceneAssetFilepath(input.scene.assets?.background) || input.backgroundFilepath || "";
 
-  pushMediaInput(args, sceneBackgroundFilepath, { loopStillImage: true });
+  if (sceneBackgroundFilepath) {
+    pushMediaInput(args, sceneBackgroundFilepath, { loopStillImage: true });
+  } else {
+    args.push("-f", "lavfi", "-i", `color=c=white:s=${outputWidth}x${outputHeight}:d=1`);
+  }
   let nextInputIndex = 1;
 
   const studioMediaOverlayInputs: StudioMediaOverlayInput[] = [];
   for (const element of resolvedElements.filter(isLayoutStudioMediaElement)) {
     const filepath =
       element.type === "screenshot"
-        ? sceneAssetFilepath(input.scene.assets?.screenshot) || input.screenshotFilepath
+        ? sceneAssetFilepath(input.scene.assets?.screenshot) || input.screenshotFilepath || ""
         : sceneAssetFilepath(sceneMediaForElement(input.scene, element.type));
     if (!filepath || !(await fileExists(filepath))) continue;
 
@@ -2642,10 +2654,13 @@ async function renderSlideImage(input: {
   }
 
   const composedOutputLabel = `slide_${input.sceneIndex}_composed`;
+  const outputIsJpeg = [".jpg", ".jpeg"].includes(
+    path.extname(input.outputFilepath).toLowerCase(),
+  );
   const filterComplex = [
     buildLayoutStudioFilterComplex({
       baseFilters: [
-        `[0:v]scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight}:(iw-ow)/2:(ih-oh)/2,setsar=1,format=rgba[bg]`,
+        `[0:v]scale=${outputWidth}:${outputHeight}:force_original_aspect_ratio=increase,crop=${outputWidth}:${outputHeight}:(iw-ow)/2:(ih-oh)/2,setsar=1,format=rgba[bg]`,
       ],
       outputLabel: composedOutputLabel,
       screenshotDimensions: input.screenshotDimensions,
@@ -2654,20 +2669,188 @@ async function renderSlideImage(input: {
       studioTextOverlays: studioTextOverlayInputs,
       mediaDimensionsByElementId,
     }),
-    `[${composedOutputLabel}]scale=${canvasWidth}:${canvasHeight}:flags=lanczos,setsar=1,format=rgba[vout]`,
+    `[${composedOutputLabel}]scale=${outputWidth}:${outputHeight}:flags=lanczos,setsar=1,format=${outputIsJpeg ? "yuv420p" : "rgba"}[vout]`,
   ].join(";");
-
-  args.push(
-    "-filter_complex",
-    filterComplex,
-    "-frames:v",
-    "1",
-    "-map",
-    "[vout]",
-    input.outputFilepath,
-  );
+  const jpegQscale = jpegQualityToFfmpegQscale(input.jpegQuality ?? 92);
+  args.push("-filter_complex", filterComplex, "-frames:v", "1", "-map", "[vout]");
+  if (outputIsJpeg) {
+    args.push("-q:v", String(jpegQscale));
+  }
+  args.push(input.outputFilepath);
 
   await runCommand(ffmpegBinary, args, { all: true });
+}
+
+function jpegQualityToFfmpegQscale(quality: number) {
+  const boundedQuality = clampNumber(quality, 1, 100, 92);
+  return clampNumber(Math.round(31 - (boundedQuality / 100) * 29), 2, 31, 2);
+}
+
+export type GroupedImagePostRenderInput = {
+  campaignId: string;
+  parentOutputId: string;
+  outputKind: "slides" | "carousel";
+  jpegQuality?: number;
+  dimensions: MediaDimensions;
+  layout: {
+    layoutId: string;
+    name?: string;
+    templateJson: unknown;
+  };
+  cards: Array<{
+    index: number;
+    sceneId?: string | null;
+    assets?: unknown;
+    elements?: unknown;
+    renderOptions?: unknown;
+  }>;
+};
+
+export type GroupedImagePostRenderResult = {
+  index: number;
+  status: "done" | "failed";
+  filename: string;
+  filepath?: string;
+  width?: number;
+  height?: number;
+  sizeBytes?: number;
+  errorMessage?: string;
+};
+
+function groupedImageTemplate(input: GroupedImagePostRenderInput) {
+  const template =
+    input.layout.templateJson && typeof input.layout.templateJson === "object"
+      ? (input.layout.templateJson as CanvasLayoutTemplate)
+      : null;
+
+  if (!template || !isLayoutStudioTemplate(template)) {
+    throw new Error("Grouped image render is missing a valid Layout Studio templateJson.");
+  }
+
+  const cardsWithElements = input.cards.filter((card) => Array.isArray(card.elements));
+  if ((template.scenes?.length ?? 0) > 0 || cardsWithElements.length === 0) {
+    return template;
+  }
+
+  return {
+    ...template,
+    scenes: input.cards.map((card) => ({
+      id: card.sceneId ?? `card-${card.index}`,
+      elements: Array.isArray(card.elements) ? card.elements as LayoutStudioElement[] : [],
+    })),
+  };
+}
+
+function groupedImageScene(
+  card: GroupedImagePostRenderInput["cards"][number],
+): NonNullable<NonNullable<RenderOptions["sceneVideoPost"]>["scenes"]>[number] {
+  const renderOptions =
+    card.renderOptions && typeof card.renderOptions === "object"
+      ? (card.renderOptions as Record<string, unknown>)
+      : {};
+  const sourceScene =
+    renderOptions.scene && typeof renderOptions.scene === "object"
+      ? (renderOptions.scene as Record<string, unknown>)
+      : {};
+
+  return {
+    ...sourceScene,
+    sceneId: card.sceneId ?? (typeof sourceScene.sceneId === "string" ? sourceScene.sceneId : null),
+    assets:
+      card.assets && typeof card.assets === "object"
+        ? (card.assets as NonNullable<NonNullable<RenderOptions["sceneVideoPost"]>["scenes"]>[number]["assets"])
+        : (
+            sourceScene.assets && typeof sourceScene.assets === "object"
+              ? (sourceScene.assets as NonNullable<NonNullable<RenderOptions["sceneVideoPost"]>["scenes"]>[number]["assets"])
+              : null
+          ),
+  };
+}
+
+export async function renderGroupedImagePostJob(
+  input: GroupedImagePostRenderInput,
+): Promise<GroupedImagePostRenderResult[]> {
+  const template = groupedImageTemplate(input);
+  const renderOptions: RenderOptions = {
+    postType: input.outputKind === "slides" ? "tiktok_slides_post" : "instagram_carousel_post",
+    layoutTemplateId: input.layout.layoutId,
+    layoutTemplateJson: template,
+    sceneVideoPost: {
+      scenes: input.cards.map(groupedImageScene),
+    },
+  };
+  const outputDirectory = path.join(
+    paths.rendersDirectory,
+    input.campaignId,
+    input.parentOutputId,
+    "grouped-images",
+  );
+
+  await fs.mkdir(outputDirectory, { recursive: true });
+
+  const scenes = renderOptions.sceneVideoPost?.scenes ?? [];
+  const fallbackMediaFilepath =
+    scenes
+      .map((scene) =>
+        sceneAssetFilepath(scene.assets?.screenshot) ||
+        sceneAssetFilepath(scene.assets?.image) ||
+        sceneAssetFilepath(scene.assets?.background),
+      )
+      .find(Boolean) ?? null;
+  const screenshotDimensions = fallbackMediaFilepath
+    ? await getMediaDimensions(fallbackMediaFilepath).catch(() => input.dimensions)
+    : input.dimensions;
+
+  const results: GroupedImagePostRenderResult[] = [];
+
+  for (const [sceneIndex, scene] of scenes.entries()) {
+    const card = input.cards[sceneIndex];
+    const index = card?.index ?? sceneIndex;
+    const filename = `${String(sceneIndex + 1).padStart(2, "0")}.jpg`;
+    const filepath = path.join(outputDirectory, filename);
+
+    try {
+      await fs.rm(filepath, { force: true });
+      await renderSlideImage({
+        backgroundFilepath: fallbackMediaFilepath,
+        campaignId: input.campaignId,
+        dimensions: input.dimensions,
+        jobId: input.parentOutputId,
+        jpegQuality: input.jpegQuality ?? 92,
+        outputFilepath: filepath,
+        renderOptions,
+        scene,
+        sceneIndex,
+        screenshotFilepath: fallbackMediaFilepath,
+        screenshotDimensions,
+        studioTemplate: template,
+      });
+
+      const stat = await fs.stat(filepath);
+      if (stat.size < 1024) {
+        throw new Error(`Rendered image ${sceneIndex + 1} is invalid (${stat.size} bytes).`);
+      }
+
+      results.push({
+        index,
+        status: "done",
+        filename,
+        filepath,
+        width: input.dimensions.width,
+        height: input.dimensions.height,
+        sizeBytes: stat.size,
+      });
+    } catch (error) {
+      results.push({
+        index,
+        status: "failed",
+        filename,
+        errorMessage: commandErrorMessage(error),
+      });
+    }
+  }
+
+  return results.sort((a, b) => a.index - b.index);
 }
 
 async function renderSlidePostJob(input: {
