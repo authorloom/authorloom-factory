@@ -2260,8 +2260,26 @@ function sceneAssetFilepath(asset: { filepath?: string | null } | null | undefin
   return asset?.filepath?.trim() ?? "";
 }
 
+type SceneVideoPostScene = NonNullable<NonNullable<RenderOptions["sceneVideoPost"]>["scenes"]>[number];
+
+function sceneVideoPostSceneForTiming(
+  options: RenderOptions,
+  sceneId: string | null | undefined,
+  sceneIndex: number,
+): SceneVideoPostScene | null {
+  const scenes = Array.isArray(options.sceneVideoPost?.scenes)
+    ? options.sceneVideoPost?.scenes ?? []
+    : [];
+
+  return (
+    (sceneId ? scenes.find((candidate) => candidate.sceneId === sceneId) : null) ??
+    scenes[sceneIndex] ??
+    null
+  );
+}
+
 function sceneMediaForElement(
-  scene: NonNullable<NonNullable<RenderOptions["sceneVideoPost"]>["scenes"]>[number],
+  scene: SceneVideoPostScene,
   elementType: string | null | undefined,
 ) {
   if (elementType === "screenshot") return scene.assets?.screenshot ?? null;
@@ -2386,16 +2404,41 @@ function layoutStudioResolvedSceneElements(
     : [];
 }
 
-function resolveLayoutStudioSceneTextElement(
-  template: CanvasLayoutTemplate | null,
-  sceneId: string | null | undefined,
-  sceneIndex: number,
-  type: string,
-) {
-  const element = layoutStudioSceneElements(template, sceneId, sceneIndex).find(
-    (candidate) => candidate.type === type,
+export async function resolveLayoutStudioSceneTextElementForRender({
+  template,
+  scene,
+  sceneId,
+  sceneIndex,
+  screenshotDimensions,
+  type,
+}: {
+  template: CanvasLayoutTemplate | null;
+  scene: SceneVideoPostScene | null;
+  sceneId: string | null | undefined;
+  sceneIndex: number;
+  screenshotDimensions: MediaDimensions;
+  type: string;
+}) {
+  const rawElements = layoutStudioSceneElements(template, sceneId, sceneIndex)
+    .map(resolveLayoutStudioElementBox)
+    .filter((element): element is LayoutStudioResolvedElement => Boolean(element));
+  const mediaDimensionsByElementId = scene
+    ? await sceneMediaDimensionsByElementId({
+        elements: rawElements,
+        scene,
+        screenshotDimensions,
+      })
+    : new Map();
+
+  return (
+    layoutStudioResolvedSceneElements(
+      template,
+      sceneId,
+      sceneIndex,
+      screenshotDimensions,
+      mediaDimensionsByElementId,
+    ).find((candidate) => candidate.type === type) ?? null
   );
-  return element ? resolveLayoutStudioElementBox(element) : null;
 }
 
 function customCanvasTemplate(options: RenderOptions): CanvasLayoutTemplate | null {
@@ -2477,10 +2520,7 @@ function customElementBox(
   };
 }
 
-function sceneSlideTextForElement(
-  scene: NonNullable<NonNullable<RenderOptions["sceneVideoPost"]>["scenes"]>[number],
-  element: LayoutStudioElement,
-) {
+function sceneSlideTextForElement(scene: SceneVideoPostScene, element: LayoutStudioElement) {
   if (element.type === "hook") return sceneAssetText(scene.assets?.hook);
   if (element.type === "title") {
     return scene.metadataTemplateId
@@ -2509,7 +2549,7 @@ function sceneSlideTextForElement(
 
 async function sceneMediaDimensionsByElementId(input: {
   elements: LayoutStudioResolvedElement[];
-  scene: NonNullable<NonNullable<RenderOptions["sceneVideoPost"]>["scenes"]>[number];
+  scene: SceneVideoPostScene;
   screenshotDimensions: MediaDimensions;
 }) {
   const dimensionsByElementId: LayoutStudioMediaDimensionsByElementId = new Map();
@@ -3198,12 +3238,18 @@ export async function renderJob(jobId: string) {
   const timedHookOverlayEntries = isFullBackgroundMultiHook
     ? (await Promise.all(
         sceneTextTimeline.map(async (textTiming, index) => {
-          const sceneHookElement = resolveLayoutStudioSceneTextElement(
-            renderOptions.layoutTemplateJson ?? null,
-            textTiming.sceneId,
-            textTiming.sceneIndex,
-            textTiming.type,
-          );
+          const sceneHookElement = await resolveLayoutStudioSceneTextElementForRender({
+            template: renderOptions.layoutTemplateJson ?? null,
+            scene: sceneVideoPostSceneForTiming(
+              renderOptions,
+              textTiming.sceneId,
+              textTiming.sceneIndex,
+            ),
+            sceneId: textTiming.sceneId,
+            sceneIndex: textTiming.sceneIndex,
+            screenshotDimensions,
+            type: textTiming.type,
+          });
 
           if (sceneHookElement) {
             const overlay = await createLayoutStudioTextOverlay({
