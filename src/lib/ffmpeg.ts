@@ -1869,7 +1869,7 @@ async function createLayoutStudioTextOverlays({
             : layerType === "tropes"
               ? layoutStudioListText(postCopy?.tropes, element)
               : layerType === "hook"
-                ? (textByType.hook || resolved?.asset?.text || "").trim()
+                ? (resolved?.asset?.text || textByType.hook || "").trim()
                 : (resolved?.asset?.text ?? textByType[layerType] ?? "").trim();
       if (!text) continue;
 

@@ -7,6 +7,7 @@ import path from "node:path";
 import { google } from "googleapis";
 
 import {
+  buildRenderJobCreativeSignature,
   createAuthor,
   createBook,
   createCampaign,
@@ -1307,10 +1308,42 @@ function upsertRenderJob(input: {
   hookId: string;
   audioId: string | null;
   thumbnailId: string | null;
+  bookId: string;
+  layoutId: string | null;
 }) {
   const db = getDatabase();
   initializeDatabase(db);
   const renderOptions = normalizeSceneRenderOptions(input.video.renderOptions, input.video.postType);
+  const renderOptionsJson = JSON.stringify({
+    ...(renderOptions ?? {}),
+    postCopy: {
+      ...((renderOptions?.postCopy && typeof renderOptions.postCopy === "object")
+        ? renderOptions.postCopy
+        : {}),
+      ...((input.video.postCopy && typeof input.video.postCopy === "object")
+        ? input.video.postCopy
+        : {}),
+      renderedBookTitleLine:
+        renderOptions?.postCopy?.renderedBookTitleLine?.trim() ||
+        input.video.postCopy?.renderedBookTitleLine?.trim() ||
+        null,
+    },
+    upstreamCreativeSignature: input.video.creativeSignature ?? null,
+    diversityScore: input.video.diversityScore ?? null,
+    safeAreaWarnings: input.video.safeAreaWarnings ?? [],
+    variationParameters: input.video.variationParameters ?? null,
+  });
+  const creativeSignature = buildRenderJobCreativeSignature({
+    bookId: input.bookId,
+    layoutId: input.layoutId,
+    screenshotId: input.screenshotId,
+    hookId: input.hookId,
+    hookText: input.video.assets.hook.text ?? null,
+    backgroundId: input.backgroundId,
+    audioId: input.audioId,
+    thumbnailId: input.thumbnailId,
+    renderOptionsJson,
+  });
   const duration = renderOptions?.durationSeconds ?? null;
   const audioStartOffset =
     renderOptions?.audioStartOffsetSeconds ?? null;
@@ -1353,6 +1386,30 @@ function upsertRenderJob(input: {
     input.video.videoOutputId,
   );
 
+  const duplicate = db
+    .prepare(
+      `
+        SELECT render_jobs.id
+        FROM render_jobs
+        JOIN campaigns
+          ON campaigns.id = render_jobs.campaign_id
+        WHERE campaigns.book_id = ?
+          AND render_jobs.creative_signature = ?
+          AND render_jobs.status IN ('pending', 'running', 'done', 'failed')
+          AND render_jobs.id != ?
+        LIMIT 1
+      `,
+    )
+    .get(input.bookId, creativeSignature, input.video.videoOutputId) as
+    | { id: string }
+    | undefined;
+
+  if (duplicate) {
+    throw new Error(
+      `Creative combination already exists for this book as render job ${duplicate.id}; refusing duplicate production job ${input.video.videoOutputId}.`,
+    );
+  }
+
   db.prepare(
     `
       INSERT OR REPLACE INTO render_jobs (
@@ -1368,13 +1425,14 @@ function upsertRenderJob(input: {
         render_duration_seconds,
         audio_start_offset_seconds,
         render_options_json,
+        creative_signature,
         background_source,
         screenshot_source,
         hook_source,
         caption,
         status
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'book', 'book', 'book', ?, 'pending')
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'book', 'book', 'book', ?, 'pending')
     `,
   ).run(
     input.video.videoOutputId,
@@ -1388,25 +1446,8 @@ function upsertRenderJob(input: {
     input.video.assets.thumbnail?.driveUrl ?? null,
     duration,
     audioStartOffset,
-    JSON.stringify({
-      ...(renderOptions ?? {}),
-      postCopy: {
-        ...((renderOptions?.postCopy && typeof renderOptions.postCopy === "object")
-          ? renderOptions.postCopy
-          : {}),
-        ...((input.video.postCopy && typeof input.video.postCopy === "object")
-          ? input.video.postCopy
-          : {}),
-        renderedBookTitleLine:
-          renderOptions?.postCopy?.renderedBookTitleLine?.trim() ||
-          input.video.postCopy?.renderedBookTitleLine?.trim() ||
-          null,
-      },
-      creativeSignature: input.video.creativeSignature ?? null,
-      diversityScore: input.video.diversityScore ?? null,
-      safeAreaWarnings: input.video.safeAreaWarnings ?? [],
-      variationParameters: input.video.variationParameters ?? null,
-    }),
+    renderOptionsJson,
+    creativeSignature,
     captionBlocks.join("\n\n"),
   );
 }
@@ -1617,6 +1658,8 @@ async function prepareLocalRenderJob(input: {
     hookId,
     audioId,
     thumbnailId,
+    bookId: input.localBookId,
+    layoutId: input.video.layoutId ?? "default_video_layout",
   });
 }
 

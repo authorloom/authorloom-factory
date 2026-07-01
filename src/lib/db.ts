@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { nanoid } from "nanoid";
 
@@ -472,6 +473,7 @@ export type RenderJob = {
   render_duration_seconds: number | null;
   audio_start_offset_seconds: number | null;
   render_options_json: string | null;
+  creative_signature: string | null;
   background_source: "campaign" | "book";
   screenshot_source: "campaign" | "book";
   hook_source: "campaign" | "book";
@@ -650,8 +652,8 @@ function createRenderJobIndexes(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_render_jobs_thumbnail_id
       ON render_jobs (thumbnail_id);
 
-    CREATE INDEX IF NOT EXISTS idx_render_jobs_thumbnail_id
-      ON render_jobs (thumbnail_id);
+    CREATE INDEX IF NOT EXISTS idx_render_jobs_creative_signature
+      ON render_jobs (creative_signature);
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_render_jobs_legacy_matrix
       ON render_jobs (
@@ -700,6 +702,7 @@ function rebuildRenderJobsForAssetSources(db: Database.Database) {
         render_duration_seconds REAL,
         audio_start_offset_seconds REAL,
         render_options_json TEXT,
+        creative_signature TEXT,
         background_source TEXT NOT NULL DEFAULT 'campaign',
         screenshot_source TEXT NOT NULL DEFAULT 'campaign',
         hook_source TEXT NOT NULL DEFAULT 'campaign',
@@ -730,6 +733,7 @@ function rebuildRenderJobsForAssetSources(db: Database.Database) {
         render_duration_seconds,
         audio_start_offset_seconds,
         render_options_json,
+        creative_signature,
         background_source,
         screenshot_source,
         hook_source,
@@ -753,6 +757,7 @@ function rebuildRenderJobsForAssetSources(db: Database.Database) {
         audio_id,
         thumbnail_id,
         thumbnail_drive_url,
+        NULL,
         NULL,
         NULL,
         NULL,
@@ -1018,6 +1023,7 @@ export function initializeDatabase(db = getDatabase()) {
       render_duration_seconds REAL,
       audio_start_offset_seconds REAL,
       render_options_json TEXT,
+      creative_signature TEXT,
       caption TEXT NOT NULL,
       output_filename TEXT,
       output_filepath TEXT,
@@ -1461,6 +1467,7 @@ export function initializeDatabase(db = getDatabase()) {
   addColumnIfMissing(db, "render_jobs", "render_duration_seconds", "REAL");
   addColumnIfMissing(db, "render_jobs", "audio_start_offset_seconds", "REAL");
   addColumnIfMissing(db, "render_jobs", "render_options_json", "TEXT");
+  addColumnIfMissing(db, "render_jobs", "creative_signature", "TEXT");
   addColumnIfMissing(
     db,
     "render_batch_audio_selections",
@@ -3912,6 +3919,31 @@ function listSelectedBatchBackgrounds(batchId: string) {
     .all(batchId) as BookBackground[];
 }
 
+function listSelectedBatchScreenshots(batchId: string) {
+  const db = getDatabase();
+  initializeDatabase(db);
+
+  return db
+    .prepare(
+      `
+        SELECT
+          book_screenshots.id,
+          book_screenshots.book_id,
+          book_screenshots.google_file_id,
+          book_screenshots.source_url,
+          book_screenshots.filename,
+          book_screenshots.filepath,
+          book_screenshots.created_at
+        FROM render_batch_screenshot_selections
+        JOIN book_screenshots
+          ON book_screenshots.id = render_batch_screenshot_selections.screenshot_id
+        WHERE render_batch_screenshot_selections.batch_id = ?
+        ORDER BY render_batch_screenshot_selections.created_at ASC
+      `,
+    )
+    .all(batchId) as BookScreenshot[];
+}
+
 function listSelectedBatchHooks(batchId: string) {
   const db = getDatabase();
   initializeDatabase(db);
@@ -4064,12 +4096,303 @@ function pickRandomCaption(captions: BookCaption[]) {
   return captions[Math.floor(Math.random() * captions.length)] ?? null;
 }
 
-function pickRandomThumbnail(thumbnails: BookThumbnail[]) {
-  if (thumbnails.length === 0) {
+type BatchCreativePlan = {
+  background: BookBackground;
+  hook: BookHook;
+  audioId: string | null;
+  thumbnail: BookThumbnail | null;
+  creativeSignature: string;
+};
+
+type RenderCreativeSignatureInput = {
+  bookId: string;
+  layoutId: string | null;
+  screenshotId: string;
+  hookId: string | null;
+  hookText: string | null;
+  backgroundId: string;
+  audioId?: string | null;
+  thumbnailId?: string | null;
+  renderOptionsJson?: string | null;
+};
+
+function stableTextHash(value: string | null | undefined) {
+  const normalized = value?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
+  return normalized
+    ? createHash("sha256").update(normalized).digest("hex").slice(0, 24)
+    : null;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  }
+
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, entryValue]) => entryValue !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entryValue]) => `${JSON.stringify(key)}:${stableJson(entryValue)}`)
+      .join(",")}}`;
+  }
+
+  return JSON.stringify(value ?? null);
+}
+
+function parseRenderOptionsJson(renderOptionsJson: string | null | undefined) {
+  if (!renderOptionsJson) {
     return null;
   }
 
-  return thumbnails[Math.floor(Math.random() * thumbnails.length)] ?? null;
+  try {
+    const parsed = JSON.parse(renderOptionsJson) as Record<string, unknown>;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function significantRenderVariantFields(renderOptionsJson: string | null | undefined) {
+  const options = parseRenderOptionsJson(renderOptionsJson);
+
+  if (!options) {
+    return null;
+  }
+
+  const postCopy =
+    options.postCopy && typeof options.postCopy === "object"
+      ? (options.postCopy as Record<string, unknown>)
+      : null;
+
+  return {
+    backgroundStartTime: options.backgroundStartTime ?? null,
+    backgroundEndTime: options.backgroundEndTime ?? null,
+    zoomLevel: options.zoomLevel ?? null,
+    cropVariant: options.cropVariant ?? null,
+    playbackSpeed: options.playbackSpeed ?? null,
+    ctaText: postCopy?.ctaText ?? null,
+    renderedBookTitleLine: postCopy?.renderedBookTitleLine ?? null,
+  };
+}
+
+export function buildRenderJobCreativeSignature(input: RenderCreativeSignatureInput) {
+  const payload = {
+    version: 1,
+    bookId: input.bookId,
+    layoutId: input.layoutId ?? "default_video_layout",
+    screenshotId: input.screenshotId,
+    hookId: input.hookId ?? null,
+    hookTextHash: input.hookId ? null : stableTextHash(input.hookText),
+    backgroundId: input.backgroundId,
+    audioId: input.audioId ?? null,
+    thumbnailId: input.thumbnailId ?? null,
+    variants: significantRenderVariantFields(input.renderOptionsJson),
+  };
+
+  return createHash("sha256").update(stableJson(payload)).digest("hex");
+}
+
+function buildBalancedBatchCreativePlan({
+  bookId,
+  layoutId,
+  backgrounds,
+  screenshots,
+  hooks,
+  audioIds,
+  thumbnails,
+}: {
+  bookId: string;
+  layoutId: string | null;
+  backgrounds: BookBackground[];
+  screenshots: BookScreenshot[];
+  hooks: BookHook[];
+  audioIds: Array<string | null>;
+  thumbnails: BookThumbnail[];
+}) {
+  const selectedScreenshotIds = new Set(screenshots.map((screenshot) => screenshot.id));
+  const hooksByScreenshot = new Map<string, BookHook[]>();
+
+  for (const hook of hooks) {
+    if (!selectedScreenshotIds.has(hook.screenshot_id)) {
+      continue;
+    }
+
+    const screenshotHooks = hooksByScreenshot.get(hook.screenshot_id) ?? [];
+    screenshotHooks.push(hook);
+    hooksByScreenshot.set(hook.screenshot_id, screenshotHooks);
+  }
+
+  const orderedHooks: BookHook[] = [];
+  const hookUseByScreenshot = new Map<string, number>();
+
+  while (orderedHooks.length < hooks.length) {
+    const nextScreenshot = screenshots
+      .filter((screenshot) => (hooksByScreenshot.get(screenshot.id)?.length ?? 0) > 0)
+      .sort((left, right) => {
+        const leftUse = hookUseByScreenshot.get(left.id) ?? 0;
+        const rightUse = hookUseByScreenshot.get(right.id) ?? 0;
+        return leftUse - rightUse || left.created_at - right.created_at || left.id.localeCompare(right.id);
+      })[0];
+
+    if (!nextScreenshot) {
+      break;
+    }
+
+    const screenshotHooks = hooksByScreenshot.get(nextScreenshot.id) ?? [];
+    const nextHook = screenshotHooks.shift();
+
+    if (!nextHook) {
+      hooksByScreenshot.delete(nextScreenshot.id);
+      continue;
+    }
+
+    orderedHooks.push(nextHook);
+    hookUseByScreenshot.set(
+      nextScreenshot.id,
+      (hookUseByScreenshot.get(nextScreenshot.id) ?? 0) + 1,
+    );
+  }
+
+  const plan: BatchCreativePlan[] = [];
+
+  for (const audioId of audioIds) {
+    for (let index = 0; index < orderedHooks.length * backgrounds.length; index += 1) {
+      const hook = orderedHooks[index % orderedHooks.length];
+      const background =
+        backgrounds[(index + Math.floor(index / orderedHooks.length)) % backgrounds.length];
+
+      if (!hook || !background) {
+        continue;
+      }
+
+      plan.push({
+        background,
+        hook,
+        audioId,
+        thumbnail: thumbnails.length > 0 ? thumbnails[index % thumbnails.length] ?? null : null,
+        creativeSignature: buildRenderJobCreativeSignature({
+          bookId,
+          layoutId,
+          screenshotId: hook.screenshot_id,
+          hookId: hook.id,
+          hookText: hook.text,
+          backgroundId: background.id,
+          audioId,
+          thumbnailId: thumbnails.length > 0 ? thumbnails[index % thumbnails.length]?.id ?? null : null,
+        }),
+      });
+    }
+  }
+
+  return plan;
+}
+
+function existingCreativeSignaturesForBook(bookId: string) {
+  const db = getDatabase();
+  initializeDatabase(db);
+
+  const rows = db
+    .prepare(
+      `
+        SELECT
+          render_jobs.campaign_id,
+          render_jobs.background_id,
+          render_jobs.screenshot_id,
+          render_jobs.hook_id,
+          render_jobs.audio_id,
+          render_jobs.thumbnail_id,
+          render_jobs.render_options_json,
+          render_jobs.creative_signature,
+          render_jobs.caption,
+          render_batches.layout_id,
+          COALESCE(hooks.text, book_hooks.text) AS hook_text
+        FROM render_jobs
+        JOIN campaigns
+          ON campaigns.id = render_jobs.campaign_id
+        LEFT JOIN render_batches
+          ON render_batches.id = render_jobs.batch_id
+        LEFT JOIN hooks
+          ON hooks.id = render_jobs.hook_id
+          AND render_jobs.hook_source = 'campaign'
+        LEFT JOIN book_hooks
+          ON book_hooks.id = render_jobs.hook_id
+          AND render_jobs.hook_source = 'book'
+        WHERE campaigns.book_id = ?
+          AND render_jobs.status IN ('pending', 'running', 'done', 'failed')
+      `,
+    )
+    .all(bookId) as Array<{
+      background_id: string;
+      screenshot_id: string;
+      hook_id: string | null;
+      audio_id: string | null;
+      thumbnail_id: string | null;
+      render_options_json: string | null;
+      creative_signature: string | null;
+      caption: string | null;
+      layout_id: string | null;
+      hook_text: string | null;
+    }>;
+
+  return new Set(
+    rows.map((row) =>
+      row.creative_signature ??
+      buildRenderJobCreativeSignature({
+        bookId,
+        layoutId: row.layout_id,
+        screenshotId: row.screenshot_id,
+        hookId: row.hook_id,
+        hookText: row.hook_text,
+        backgroundId: row.background_id,
+        audioId: row.audio_id,
+        thumbnailId: row.thumbnail_id,
+        renderOptionsJson: row.render_options_json,
+      }),
+    ),
+  );
+}
+
+function assertBatchHasEnoughUniqueCreativeCombinations({
+  plan,
+  existingSignatures,
+  screenshotCount,
+  hookCount,
+  backgroundCount,
+}: {
+  plan: BatchCreativePlan[];
+  existingSignatures: Set<string>;
+  screenshotCount: number;
+  hookCount: number;
+  backgroundCount: number;
+}) {
+  const plannedSignatures = new Set<string>();
+  let alreadyUsedCount = 0;
+
+  for (const item of plan) {
+    if (existingSignatures.has(item.creativeSignature)) {
+      alreadyUsedCount += 1;
+      continue;
+    }
+
+    plannedSignatures.add(item.creativeSignature);
+  }
+
+  if (plannedSignatures.size === plan.length) {
+    return;
+  }
+
+  const limitingPools = [
+    screenshotCount <= 1 ? "screenshots" : null,
+    hookCount <= screenshotCount ? "hooks" : null,
+    backgroundCount <= 1 ? "backgrounds" : null,
+  ].filter((value): value is string => Boolean(value));
+  const poolMessage = limitingPools.length > 0
+    ? ` Add more ${limitingPools.join(", ")} to unlock more unique combinations.`
+    : " Add more screenshots, hooks, or backgrounds to unlock more unique combinations.";
+
+  throw new Error(
+    `This batch requests ${plan.length} creative combination${plan.length === 1 ? "" : "s"}, but only ${plannedSignatures.size} unique new combination${plannedSignatures.size === 1 ? "" : "s"} are available for this book. ${alreadyUsedCount} combination${alreadyUsedCount === 1 ? " has" : "s have"} already been produced, queued, rendered, or recently failed.${poolMessage}`,
+  );
 }
 
 export function generateRenderJobsForBatch(
@@ -4080,7 +4403,14 @@ export function generateRenderJobsForBatch(
   initializeDatabase(db);
 
   const batch = getRenderBatchWithCampaign(batchId);
+  const bookId = batch.book_id;
+
+  if (!bookId) {
+    throw new Error("Render batch campaign is not linked to a book.");
+  }
+
   const backgrounds = listSelectedBatchBackgrounds(batchId);
+  const screenshots = listSelectedBatchScreenshots(batchId);
   const hooks = listSelectedBatchHooks(batchId);
   const audioAssets = listSelectedBatchAudioAssets(batchId);
   const captions = listSelectedBatchCaptions(batchId);
@@ -4091,7 +4421,16 @@ export function generateRenderJobsForBatch(
     audioAssets.map((audio) => [audio.id, audio.render_duration_seconds]),
   );
   const audioIds = selectedAudioIds.length > 0 ? selectedAudioIds : [null];
-  const previewCount = backgrounds.length * hooks.length * audioIds.length;
+  const plan = buildBalancedBatchCreativePlan({
+    bookId,
+    layoutId: batch.layout_id,
+    backgrounds,
+    screenshots,
+    hooks,
+    audioIds,
+    thumbnails,
+  });
+  const previewCount = plan.length;
 
   if (previewCount === 0) {
     return {
@@ -4107,6 +4446,14 @@ export function generateRenderJobsForBatch(
     );
   }
 
+  assertBatchHasEnoughUniqueCreativeCombinations({
+    plan,
+    existingSignatures: existingCreativeSignaturesForBook(bookId),
+    screenshotCount: screenshots.length,
+    hookCount: hooks.length,
+    backgroundCount: backgrounds.length,
+  });
+
   const insertRenderJob = db.prepare(
     `
       INSERT OR IGNORE INTO render_jobs (
@@ -4120,6 +4467,7 @@ export function generateRenderJobsForBatch(
         thumbnail_id,
         thumbnail_drive_url,
         render_duration_seconds,
+        creative_signature,
         background_source,
         screenshot_source,
         hook_source,
@@ -4137,6 +4485,7 @@ export function generateRenderJobsForBatch(
         @thumbnailId,
         @thumbnailDriveUrl,
         @renderDurationSeconds,
+        @creativeSignature,
         'book',
         'book',
         'book',
@@ -4149,33 +4498,40 @@ export function generateRenderJobsForBatch(
   const insertMany = db.transaction(() => {
     let createdCount = 0;
 
-    for (const background of backgrounds) {
-      for (const hook of hooks) {
-        for (const selectedAudioId of audioIds) {
-          const selectedCaption = pickRandomCaption(captions);
-          const selectedThumbnail = pickRandomThumbnail(thumbnails);
-          const result = insertRenderJob.run({
-            id: nanoid(),
-            campaignId: batch.campaign_id,
-            batchId,
-            backgroundId: background.id,
-            screenshotId: hook.screenshot_id,
-            hookId: hook.id,
-            audioId: selectedAudioId,
-            thumbnailId: selectedThumbnail?.id ?? null,
-            thumbnailDriveUrl: selectedThumbnail?.drive_url ?? null,
-            renderDurationSeconds: selectedAudioId
-              ? (audioRenderDurations.get(selectedAudioId) ?? null)
-              : null,
-            caption: buildBatchPostCaption({
-              captionText: selectedCaption?.text,
-              hashtags,
-            }),
-          });
+    for (const plannedPost of plan) {
+      const selectedCaption = pickRandomCaption(captions);
+      const caption = buildBatchPostCaption({
+        captionText: selectedCaption?.text,
+        hashtags,
+      });
+      const creativeSignature = buildRenderJobCreativeSignature({
+        bookId,
+        layoutId: batch.layout_id,
+        screenshotId: plannedPost.hook.screenshot_id,
+        hookId: plannedPost.hook.id,
+        hookText: plannedPost.hook.text,
+        backgroundId: plannedPost.background.id,
+        audioId: plannedPost.audioId,
+        thumbnailId: plannedPost.thumbnail?.id ?? null,
+      });
+      const result = insertRenderJob.run({
+        id: nanoid(),
+        campaignId: batch.campaign_id,
+        batchId,
+        backgroundId: plannedPost.background.id,
+        screenshotId: plannedPost.hook.screenshot_id,
+        hookId: plannedPost.hook.id,
+        audioId: plannedPost.audioId,
+        thumbnailId: plannedPost.thumbnail?.id ?? null,
+        thumbnailDriveUrl: plannedPost.thumbnail?.drive_url ?? null,
+        renderDurationSeconds: plannedPost.audioId
+          ? (audioRenderDurations.get(plannedPost.audioId) ?? null)
+          : null,
+        creativeSignature,
+        caption,
+      });
 
-          createdCount += result.changes;
-        }
-      }
+      createdCount += result.changes;
     }
 
     return createdCount;
@@ -5919,6 +6275,7 @@ export function listRenderJobs(campaignId: string) {
           render_jobs.render_duration_seconds,
           render_jobs.audio_start_offset_seconds,
           render_jobs.render_options_json,
+          render_jobs.creative_signature,
           render_jobs.background_source,
           render_jobs.screenshot_source,
           render_jobs.hook_source,
@@ -5993,6 +6350,7 @@ export function listRenderJobsByBatch(batchId: string) {
           render_jobs.render_duration_seconds,
           render_jobs.audio_start_offset_seconds,
           render_jobs.render_options_json,
+          render_jobs.creative_signature,
           render_jobs.background_source,
           render_jobs.screenshot_source,
           render_jobs.hook_source,
@@ -6041,7 +6399,7 @@ export function listRenderJobsByBatch(batchId: string) {
         LEFT JOIN book_thumbnails
           ON book_thumbnails.id = render_jobs.thumbnail_id
         WHERE render_jobs.batch_id = ?
-        ORDER BY datetime(render_jobs.created_at) DESC, render_jobs.id ASC
+        ORDER BY render_jobs.rowid ASC
       `,
     )
     .all(batchId) as RenderJobListItem[];
@@ -6067,6 +6425,7 @@ export function getRenderJobDetails(jobId: string) {
           render_jobs.render_duration_seconds,
           render_jobs.audio_start_offset_seconds,
           render_jobs.render_options_json,
+          render_jobs.creative_signature,
           render_jobs.background_source,
           render_jobs.screenshot_source,
           render_jobs.hook_source,
