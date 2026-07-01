@@ -645,6 +645,7 @@ function buildImageTextFilterComplex({
   keywordsOverlay,
   studioTextOverlays = [],
   mediaDimensionsByElementId,
+  resolvedLayoutStudioElements,
   studioTimeline,
   outputLabel = "vout",
 }: {
@@ -662,6 +663,7 @@ function buildImageTextFilterComplex({
   keywordsOverlay?: OverlayInput | null;
   studioTextOverlays?: StudioTextOverlayInput[];
   mediaDimensionsByElementId?: LayoutStudioMediaDimensionsByElementId;
+  resolvedLayoutStudioElements?: LayoutStudioResolvedElement[];
   studioTimeline?: {
     mainStartSeconds: number;
     mainEndSeconds: number;
@@ -880,6 +882,7 @@ function buildImageTextFilterComplex({
       studioMediaOverlays,
       studioTextOverlays,
       mediaDimensionsByElementId,
+      resolvedElements: resolvedLayoutStudioElements,
     });
   }
 
@@ -1034,6 +1037,7 @@ function buildLayoutStudioFilterComplex({
   studioMediaOverlays,
   studioTextOverlays,
   mediaDimensionsByElementId,
+  resolvedElements,
 }: {
   baseFilters: string[];
   coverOverlay?: CoverOverlayInput | null;
@@ -1049,12 +1053,15 @@ function buildLayoutStudioFilterComplex({
   studioMediaOverlays?: StudioMediaOverlayInput[];
   studioTextOverlays: StudioTextOverlayInput[];
   mediaDimensionsByElementId?: LayoutStudioMediaDimensionsByElementId;
+  resolvedElements?: LayoutStudioResolvedElement[];
 }) {
-  const elements = resolveLayoutStudioElements(
-    studioTemplate,
-    screenshotDimensions,
-    mediaDimensionsByElementId,
-  );
+  const elements =
+    resolvedElements ??
+    resolveLayoutStudioElements(
+      studioTemplate,
+      screenshotDimensions,
+      mediaDimensionsByElementId,
+    );
   const mediaOverlays = studioMediaOverlays ?? [];
   const textOverlaysByElementId = new Map<string, StudioTextOverlayInput[]>();
   for (const overlay of studioTextOverlays) {
@@ -1231,9 +1238,13 @@ function studioElementKey(element: Pick<LayoutStudioElement, "id" | "type" | "x"
 }
 
 function isLayoutStudioTemplate(template: CanvasLayoutTemplate | null | undefined) {
+  const hasTopLevelElements = Array.isArray(template?.elements) && template.elements.length > 0;
+  const hasSceneElements = Array.isArray(template?.scenes) &&
+    template.scenes.some((scene) => Array.isArray(scene.elements) && scene.elements.length > 0);
+
   return (
     template?.kind === "layoutStudio" &&
-    Array.isArray(template.elements) &&
+    (hasTopLevelElements || hasSceneElements) &&
     template.canvas?.width === canvasWidth &&
     template.canvas?.height === canvasHeight
   );
@@ -1452,14 +1463,6 @@ function resolveLayoutStudioElementBox(
     width: clampNumber(element.width, 1, canvasWidth * 2, 1),
     height: clampNumber(element.height, 1, canvasHeight * 2, 1),
   };
-}
-
-function safeAreaForStudioTemplate(template: CanvasLayoutTemplate) {
-  if (template.overlay?.platform === "instagram") {
-    return { x: 120, y: 270, width: 840, height: 1400 };
-  }
-
-  return { x: 120, y: 200, width: 840, height: 1400 };
 }
 
 function fittedLayoutStudioMediaBounds(
@@ -2404,6 +2407,25 @@ function layoutStudioResolvedSceneElements(
     : [];
 }
 
+export function resolveLayoutStudioElementsForRender({
+  template,
+  screenshotDimensions,
+  mediaDimensionsByElementId,
+}: {
+  template: CanvasLayoutTemplate | null;
+  screenshotDimensions: MediaDimensions;
+  mediaDimensionsByElementId?: LayoutStudioMediaDimensionsByElementId;
+}) {
+  const studioTemplate = template && isLayoutStudioTemplate(template) ? template : null;
+  return studioTemplate
+    ? resolveLayoutStudioElements(
+        studioTemplate,
+        screenshotDimensions,
+        mediaDimensionsByElementId,
+      )
+    : [];
+}
+
 export async function resolveLayoutStudioSceneTextElementForRender({
   template,
   scene,
@@ -2695,6 +2717,7 @@ async function renderSlideImage(input: {
       studioTemplate: rawSceneTemplate,
       studioTextOverlays: studioTextOverlayInputs,
       mediaDimensionsByElementId,
+      resolvedElements,
     }),
     `[${composedOutputLabel}]scale=${canvasWidth}:${canvasHeight}:flags=lanczos,setsar=1,format=rgba[vout]`,
   ].join(";");
@@ -3463,6 +3486,7 @@ export async function renderJob(jobId: string) {
 
   const studioBackgroundOverlayInputs: StudioBackgroundOverlayInput[] = [];
   const studioMediaOverlayInputs: StudioMediaOverlayInput[] = [];
+  let resolvedStudioElements: LayoutStudioResolvedElement[] | undefined;
 
   if (studioTemplate) {
     const resolvedClips = resolvedTimelineClipById(renderOptions);
@@ -3472,6 +3496,7 @@ export async function renderJob(jobId: string) {
       screenshotDimensions,
       studioMediaDimensionsByElementId,
     );
+    resolvedStudioElements = elements;
     const elementById = new Map(
       elements
         .filter((element) => element.id)
@@ -3618,6 +3643,7 @@ export async function renderJob(jobId: string) {
         : null,
     studioTextOverlays: studioTextOverlayInputs,
     mediaDimensionsByElementId: studioMediaDimensionsByElementId,
+    resolvedLayoutStudioElements: resolvedStudioElements,
     studioTimeline: studioTemplate
       ? {
           mainStartSeconds: studioMainStartSeconds,
