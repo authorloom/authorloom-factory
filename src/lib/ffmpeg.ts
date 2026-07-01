@@ -1868,7 +1868,9 @@ async function createLayoutStudioTextOverlays({
             ? layoutStudioListText(keywords, element)
             : layerType === "tropes"
               ? layoutStudioListText(postCopy?.tropes, element)
-              : (resolved?.asset?.text ?? textByType[layerType] ?? "").trim();
+              : layerType === "hook"
+                ? (textByType.hook || resolved?.asset?.text || "").trim()
+                : (resolved?.asset?.text ?? textByType[layerType] ?? "").trim();
       if (!text) continue;
 
       const overlay = await createLayoutStudioTextOverlay({
