@@ -174,13 +174,16 @@ function splitEmojiRuns(text) {
   let textRun = "";
 
   for (const { segment } of graphemeSegmenter.segment(text)) {
+    const isPlainKeycapBase = /^[0-9#*]$/u.test(segment);
+    const isKeycapSequence = segment.includes("\u20e3");
+
+    if (isPlainKeycapBase && !isKeycapSequence) {
+      textRun += segment;
+      continue;
+    }
+
     if (emojiPattern.test(segment)) {
       const emojiSrc = getNotoEmojiDataUri(segment);
-
-      if (!emojiSrc && /^[0-9#*]$/.test(segment)) {
-        textRun += segment;
-        continue;
-      }
 
       if (textRun) {
         runs.push({ type: "text", value: textRun });
