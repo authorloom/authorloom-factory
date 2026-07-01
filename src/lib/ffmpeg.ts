@@ -3440,14 +3440,14 @@ export async function renderJob(jobId: string) {
 
     for (const clip of timelineClips) {
       const resolved = clip.id ? resolvedClips.get(clip.id) : null;
-      const filepath = resolved?.asset?.filepath ?? null;
-      if (!filepath || !(await fileExists(filepath))) continue;
-
       const startSeconds = clampNumber(clip.startSeconds, 0, 3600, 0);
       const endSeconds = timelineClipEndSeconds(clip);
       const layerType = clip.layerType ?? "";
 
       if (layerType === "background") {
+        const filepath = resolved?.asset?.filepath ?? null;
+        if (!filepath || !(await fileExists(filepath))) continue;
+
         pushMediaInput(args, filepath, {
           loop: true,
           loopStillImage: true,
@@ -3468,10 +3468,18 @@ export async function renderJob(jobId: string) {
         (clip.elementId ? elementById.get(clip.elementId) : null) ??
         (fallbackElementsByType.get(layerType) ?? [])[0];
       if (!element) continue;
-      const dimensions = await getMediaDimensions(filepath).catch(() => ({
-        width: canvasWidth,
-        height: canvasHeight,
-      }));
+      const filepath =
+        layerType === "screenshot"
+          ? preparedScreenshot.filepath
+          : resolved?.asset?.filepath ?? null;
+      if (!filepath || !(await fileExists(filepath))) continue;
+      const dimensions =
+        layerType === "screenshot"
+          ? screenshotDimensions
+          : await getMediaDimensions(filepath).catch(() => ({
+              width: canvasWidth,
+              height: canvasHeight,
+            }));
 
       pushMediaInput(args, filepath, {
         loop: true,
