@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  layoutStudioCompositionDurationSeconds,
   resolveLayoutStudioElementsForRender,
   resolveLayoutStudioSceneTextElementForRender,
 } from "../ffmpeg";
@@ -85,6 +86,29 @@ test("Layout Studio templates with scene-only elements resolve as renderable Stu
   assert.deepEqual(
     elements.map((element) => element.id),
     ["screenshot-1", "hook-1", "keywords-1"],
+  );
+});
+
+test("Layout Studio composition duration comes from composition timeline", () => {
+  assert.equal(
+    layoutStudioCompositionDurationSeconds({
+      ...template,
+      timeline: {
+        previewDurationSeconds: 7,
+      },
+      compositionTimeline: {
+        durationSeconds: 12,
+        clips: [
+          {
+            id: "screenshot-clip",
+            layerType: "asset",
+            startSeconds: 0,
+            durationSeconds: 12,
+          },
+        ],
+      },
+    }),
+    12,
   );
 });
 

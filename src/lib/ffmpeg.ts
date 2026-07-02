@@ -1276,6 +1276,25 @@ function timelineClipEndSeconds(clip: { startSeconds?: number; durationSeconds?:
   return startSeconds + durationSeconds;
 }
 
+export function layoutStudioCompositionDurationSeconds(
+  template: CanvasLayoutTemplate | null | undefined,
+) {
+  const explicitDuration = clampNumber(
+    template?.compositionTimeline?.durationSeconds,
+    0.1,
+    3600,
+    0,
+  );
+  if (explicitDuration > 0) return explicitDuration;
+
+  const duration = layoutStudioTimelineClips(template).reduce(
+    (max, clip) => Math.max(max, timelineClipEndSeconds(clip)),
+    0,
+  );
+
+  return duration > 0 ? duration : null;
+}
+
 function resolvedTimelineClipById(options: RenderOptions) {
   const clips = options.timelineVideoPost?.resolvedClips ?? [];
   return new Map(
@@ -2941,7 +2960,9 @@ function studioVideoTimelineDurations(
   options: RenderOptions,
 ) {
   const timeline = template?.timeline;
-  const mainDuration = clampNumber(requestedMainDuration, 0.1, 30, requestedMainDuration);
+  const compositionDuration = layoutStudioCompositionDurationSeconds(template);
+  const resolvedMainDuration = compositionDuration ?? requestedMainDuration;
+  const mainDuration = clampNumber(resolvedMainDuration, 0.1, 30, resolvedMainDuration);
   const introDurationOverride = options.layoutStudioAssets?.introDurationSeconds ?? null;
   const outroDurationOverride = options.layoutStudioAssets?.outroDurationSeconds ?? null;
   const introDuration = timeline?.introEnabled
