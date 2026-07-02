@@ -1,10 +1,12 @@
 import { ConvexHttpClient } from "convex/browser";
 import { anyApi } from "convex/server";
 import { randomUUID } from "node:crypto";
+import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
-import { google } from "googleapis";
+import { pipeline } from "node:stream/promises";
+import { drive_v3, google } from "googleapis";
 
 import {
   buildRenderJobCreativeSignature,
@@ -142,6 +144,39 @@ function retryDelayMs(attempt: number) {
 
 async function sleep(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shouldRetryConvexMutationError(error: unknown) {
+  return compactErrorMessage(error).includes("OptimisticConcurrencyControlFailure");
+}
+
+async function runConvexMutationWithRetries<T>(
+  label: string,
+  operation: () => Promise<T>,
+) {
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= sourceDownloadAttempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+
+      if (
+        !shouldRetryConvexMutationError(error) ||
+        attempt === sourceDownloadAttempts
+      ) {
+        throw error;
+      }
+
+      console.warn(
+        `${label} attempt ${attempt}/${sourceDownloadAttempts} hit a Convex concurrency conflict; retrying.`,
+      );
+      await sleep(retryDelayMs(attempt));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(`${label} failed.`);
 }
 
 async function fetchWithRetries(
@@ -856,7 +891,7 @@ async function ensureSourceFileDownloaded(input: {
 }) {
   const mediaSource = input.asset ? await resolveMediaSource(input.asset) : null;
 
-  if (!input.sourceUrl && !mediaSource) {
+  if (!input.sourceUrl && !mediaSource && !input.asset?.driveFileId) {
     throw new Error(`${input.fallbackFilename} is missing a GCS render source URL.`);
   }
 
@@ -872,6 +907,10 @@ async function ensureSourceFileDownloaded(input: {
     console.log(`Source asset already cached: ${filepath}`);
     return filepath;
   } catch {
+    // Download below.
+  }
+
+  try {
     const sourceLabel = mediaSource
       ? `${mediaSource.bucketName}/${mediaSource.objectName}`
       : input.sourceUrl;
@@ -922,7 +961,45 @@ async function ensureSourceFileDownloaded(input: {
     }
     console.log(`Source asset downloaded: ${filepath}`);
     return filepath;
+  } catch (error) {
+    if (!input.asset?.driveFileId) {
+      throw error;
+    }
+
+    console.warn(
+      `Primary source download failed for ${input.asset.assetId}; falling back to Drive file ${input.asset.driveFileId}: ${compactErrorMessage(error)}`,
+    );
+    await downloadDriveFileToPath(input.asset.driveFileId, filepath);
+    console.log(`Source asset downloaded from Drive: ${filepath}`);
+    return filepath;
   }
+}
+
+async function downloadDriveFileToPath(fileId: string, filepath: string) {
+  const clients = [
+    getGoogleServiceAccountAuth({ impersonateWorkspace: false }),
+    getGoogleServiceAccountAuth({ impersonateWorkspace: true }),
+  ];
+  const errors: unknown[] = [];
+
+  for (const auth of clients) {
+    try {
+      const drive: drive_v3.Drive = google.drive({ version: "v3", auth });
+      const response = await drive.files.get(
+        { fileId, alt: "media", supportsAllDrives: true },
+        { responseType: "stream" },
+      );
+
+      await pipeline(response.data, createWriteStream(filepath));
+      return;
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+
+  throw new Error(
+    `Could not download Google Drive file ${fileId}: ${compactErrorMessage(errors[0])}`,
+  );
 }
 
 function mediaIdForAsset(asset: RenderAssetRef) {
@@ -1908,7 +1985,21 @@ async function processRenderCampaign(job: ClaimedJob) {
   const localCampaign = ensureLocalCampaign(input, localBook.id);
   const localBatch = ensureLocalBatch(localCampaign.id, input);
 
-  const results = [];
+  const results: Array<{
+    videoOutputId: Id<"videoOutputs">;
+    fingerprint: string;
+    status: "done" | "failed";
+    driveFileId?: string | null;
+    driveUrl?: string | null;
+    stagedPreviewObjectName?: string | null;
+    stagedPreviewUrl?: string | null;
+    outputFilename?: string | null;
+    durationSeconds?: number | null;
+    startedAt?: string;
+    finishedAt?: string;
+    metadata?: Record<string, unknown>;
+    error?: string;
+  }> = [];
   const errors: string[] = [];
 
   for (const video of videos) {
@@ -2008,24 +2099,26 @@ async function processRenderCampaign(job: ClaimedJob) {
   const rendered = results.filter((result) => result.status === "done").length;
   const failed = results.filter((result) => result.status === "failed").length;
 
-  const report = await client.mutation(api.productionJobs.reportRenderCampaignResult, {
-    workerId,
-    workerSecret: requiredWorkerSecret,
-    result: {
-      version: "render_campaign_result.v1",
-      productionJobId: job.job.id,
-      campaignId: job.campaign?.id ?? (input.campaignId as Id<"campaigns">),
-      processedAt: new Date().toISOString(),
-      summary: {
-        requested: videos.length,
-        rendered,
-        skippedExisting: 0,
-        failed,
+  const report = await runConvexMutationWithRetries("Report render campaign result", () =>
+    client.mutation(api.productionJobs.reportRenderCampaignResult, {
+      workerId,
+      workerSecret: requiredWorkerSecret,
+      result: {
+        version: "render_campaign_result.v1",
+        productionJobId: job.job.id,
+        campaignId: job.campaign?.id ?? (input.campaignId as Id<"campaigns">),
+        processedAt: new Date().toISOString(),
+        summary: {
+          requested: videos.length,
+          rendered,
+          skippedExisting: 0,
+          failed,
+        },
+        videos: results,
+        errors: compactErrorList(errors),
       },
-      videos: results,
-      errors: compactErrorList(errors),
-    },
-  });
+    }),
+  );
   const reportResult = report as { success?: boolean; message?: string };
 
   if (reportResult.success === false) {
