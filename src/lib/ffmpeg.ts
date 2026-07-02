@@ -3541,16 +3541,17 @@ export async function renderJob(jobId: string) {
       if (!element) continue;
       const filepath =
         layerType === "screenshot"
-          ? preparedScreenshot.filepath
+          ? resolved?.asset?.filepath ?? preparedScreenshot.filepath
           : resolved?.asset?.filepath ?? null;
       if (!filepath || !(await fileExists(filepath))) continue;
-      const dimensions =
+      const dimensions = await getMediaDimensions(filepath).catch(() =>
         layerType === "screenshot"
           ? screenshotDimensions
-          : await getMediaDimensions(filepath).catch(() => ({
+          : {
               width: canvasWidth,
               height: canvasHeight,
-            }));
+            },
+      );
 
       pushMediaInput(args, filepath, {
         loop: true,
