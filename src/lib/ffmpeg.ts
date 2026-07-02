@@ -357,13 +357,14 @@ function sameRenderFilepath(left: string | null | undefined, right: string | nul
 async function runCommand(
   file: string,
   args: string[],
-  options: { all?: boolean } = {},
+  options: { all?: boolean; maxBuffer?: number } = {},
 ) {
   const { execa } = await import("execa");
   return execa(file, args, {
     ...options,
     timeout: ffmpegTimeoutMs,
     killSignal: "SIGKILL",
+    maxBuffer: options.maxBuffer ?? 1_000_000,
   });
 }
 
@@ -2664,7 +2665,7 @@ async function renderSlideImage(input: {
   const elementByKey = new Map(
     resolvedElements.map((element) => [studioElementKey(element), element]),
   );
-  const args = ["-y"];
+  const args = ["-y", "-hide_banner", "-loglevel", "error"];
   const sceneBackgroundFilepath =
     sceneAssetFilepath(input.scene.assets?.background) || input.backgroundFilepath;
 
@@ -2757,7 +2758,7 @@ async function renderSlideImage(input: {
     input.outputFilepath,
   );
 
-  await runCommand(ffmpegBinary, args, { all: true });
+  await runCommand(ffmpegBinary, args, { all: true, maxBuffer: 500_000 });
 }
 
 async function renderSlidePostJob(input: {
@@ -3379,7 +3380,7 @@ export async function renderJob(jobId: string) {
         })
     : null;
 
-  const args = ["-y"];
+  const args = ["-y", "-hide_banner", "-loglevel", "error"];
 
   if (
     !backgroundIsStillImage &&
@@ -3769,36 +3770,34 @@ export async function renderJob(jobId: string) {
   );
 
   try {
-    console.log("Render job inputs:", {
+    console.log("Render job summary:", {
       jobId: job.id,
       background: job.background_filepath,
-      backgroundColorMetadata,
       toneMapBackground: isHdrVideo(backgroundColorMetadata),
       screenshot: preparedScreenshot.filepath,
-      originalScreenshot: job.screenshot_filepath,
       screenshotDimensions,
       audio: job.audio_filepath,
-      thumbnail: null,
       output: outputFilepath,
       renderDurationSeconds,
-      thumbnailIntroDuration: null,
-      hookOverlay,
-      timedHookOverlays: timedHookOverlayEntries.map((entry) => entry.overlay),
-      sceneVisualOverlayInputs,
-      studioTextOverlays,
-      layout,
-      renderOptions,
-      postCopyOverlays,
-      safeArea: {
-        safeTop,
-        safeBottom,
-        safeContentBottom,
-      },
+      timedHookOverlayCount: timedHookOverlayEntries.length,
+      sceneVisualOverlayCount: sceneVisualOverlayInputs.length,
+      studioTextOverlayCount: studioTextOverlays.length,
+      studioBackgroundOverlayCount: studioBackgroundOverlayInputs.length,
+      studioMediaOverlayCount: studioMediaOverlayInputs.length,
+      layoutTemplateId: renderOptions.layoutTemplateId,
+      durationSeconds: renderOptions.durationSeconds,
+      cropVariant: renderOptions.variationParameters?.cropVariant,
     });
 
-    console.log("FFmpeg args:", args.join(" "));
+    console.log("FFmpeg render command:", {
+      jobId: job.id,
+      inputCount: nextInputIndex,
+      filterLength: filterComplex.length,
+      output: outputFilepath,
+      preset: outputVideoPreset,
+    });
 
-    await runCommand(ffmpegBinary, args, { all: true });
+    await runCommand(ffmpegBinary, args, { all: true, maxBuffer: 500_000 });
 
     const [outputStat, outputDuration] = await Promise.all([
       fs.stat(outputFilepath),
