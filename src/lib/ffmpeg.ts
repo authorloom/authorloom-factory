@@ -357,14 +357,17 @@ function sameRenderFilepath(left: string | null | undefined, right: string | nul
 async function runCommand(
   file: string,
   args: string[],
-  options: { all?: boolean; maxBuffer?: number } = {},
+  options: { all?: boolean; ignoreOutput?: boolean; maxBuffer?: number } = {},
 ) {
   const { execa } = await import("execa");
+  const { ignoreOutput, ...execaOptions } = options;
+
   return execa(file, args, {
-    ...options,
+    ...execaOptions,
     timeout: ffmpegTimeoutMs,
     killSignal: "SIGKILL",
-    maxBuffer: options.maxBuffer ?? 1_000_000,
+    maxBuffer: ignoreOutput ? undefined : options.maxBuffer ?? 1_000_000,
+    ...(ignoreOutput ? { stdout: "ignore" as const, stderr: "ignore" as const } : {}),
   });
 }
 
@@ -439,7 +442,7 @@ async function getMediaDurationSeconds(filepath: string): Promise<number | null>
     ],
     { all: true },
   );
-  const duration = Number.parseFloat(result.stdout.trim());
+  const duration = Number.parseFloat((result.stdout ?? "").trim());
 
   return Number.isFinite(duration) && duration > 0 ? duration : null;
 }
@@ -2758,7 +2761,7 @@ async function renderSlideImage(input: {
     input.outputFilepath,
   );
 
-  await runCommand(ffmpegBinary, args, { all: true, maxBuffer: 10_000_000 });
+  await runCommand(ffmpegBinary, args, { ignoreOutput: true });
 }
 
 async function renderSlidePostJob(input: {
@@ -3797,7 +3800,7 @@ export async function renderJob(jobId: string) {
       preset: outputVideoPreset,
     });
 
-    await runCommand(ffmpegBinary, args, { all: true, maxBuffer: 10_000_000 });
+    await runCommand(ffmpegBinary, args, { ignoreOutput: true });
 
     const [outputStat, outputDuration] = await Promise.all([
       fs.stat(outputFilepath),
