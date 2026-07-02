@@ -348,6 +348,11 @@ type StudioBackgroundOverlayInput = OverlayInput & {
   endSeconds: number;
 };
 
+function sameRenderFilepath(left: string | null | undefined, right: string | null | undefined) {
+  if (!left || !right) return false;
+  return path.resolve(left) === path.resolve(right);
+}
+
 async function runCommand(
   file: string,
   args: string[],
@@ -3539,6 +3544,7 @@ export async function renderJob(jobId: string) {
       if (layerType === "background") {
         const filepath = resolved?.asset?.filepath ?? null;
         if (!filepath || !(await fileExists(filepath))) continue;
+        if (sameRenderFilepath(filepath, job.background_filepath)) continue;
 
         pushMediaInput(args, filepath, {
           loop: true,
