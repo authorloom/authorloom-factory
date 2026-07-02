@@ -24,6 +24,7 @@ const outputFps = 30;
 const outputVideoBitrate = "10M";
 const outputVideoMaxrate = "12M";
 const outputVideoBufsize = "20M";
+const outputVideoPreset = process.env.AUTHORLOOM_FFMPEG_VIDEO_PRESET ?? "veryfast";
 const outputAudioBitrate = "192k";
 const outputAudioSampleRate = "48000";
 const outputColorSpace = "bt709";
@@ -3739,7 +3740,7 @@ export async function renderJob(jobId: string) {
     "-c:v",
     "libx264",
     "-preset",
-    "medium",
+    outputVideoPreset,
     "-profile:v",
     "high",
     "-level:v",
