@@ -1343,6 +1343,7 @@ async function layoutStudioMediaDimensionsByElementId({
   for (const clip of timelineClips) {
     const layerType = clip.layerType ?? "";
     if (!["screenshot", "image", "cover"].includes(layerType)) continue;
+    if (layerType === "screenshot") continue;
 
     const resolved = clip.id ? resolvedClips.get(clip.id) : null;
     const filepath = resolved?.asset?.filepath ?? null;
