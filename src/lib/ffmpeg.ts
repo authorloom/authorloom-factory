@@ -540,11 +540,11 @@ function pushMediaInput(
   if (options.loop && !isStillImageFile(filepath)) {
     args.push("-stream_loop", "-1");
   }
+  if (options.durationSeconds !== undefined) {
+    args.push("-t", String(options.durationSeconds));
+  }
   if (options.loopStillImage && isStillImageFile(filepath)) {
     args.push("-f", "image2", "-loop", "1");
-    if (options.durationSeconds !== undefined) {
-      args.push("-t", String(options.durationSeconds));
-    }
   }
   args.push("-i", filepath);
 }
@@ -3239,13 +3239,13 @@ export async function renderJob(jobId: string) {
   let studioMainDuration = studioTemplate ? studioTimelineDurations.mainDuration : renderDuration;
   let studioOutroDuration = studioTemplate ? studioTimelineDurations.outroDuration : 0;
   let shouldLoopBackgroundVideo = false;
+  const requiredBackgroundInputDuration = renderDuration * playbackSpeed;
 
   if (backgroundDuration !== null) {
     const requestedBackgroundStart = Math.max(0, renderOptions.backgroundStartTime ?? 0);
-    const requiredInputDuration = renderDuration * playbackSpeed;
     const latestBackgroundStart = backgroundIsStillImage
       ? requestedBackgroundStart
-      : Math.max(0, backgroundDuration - requiredInputDuration);
+      : Math.max(0, backgroundDuration - requiredBackgroundInputDuration);
     renderOptions.backgroundStartTime = Math.min(
       requestedBackgroundStart,
       latestBackgroundStart,
@@ -3255,7 +3255,7 @@ export async function renderJob(jobId: string) {
       backgroundDuration - renderOptions.backgroundStartTime,
     );
 
-    if (availableInputDuration + 0.05 < requiredInputDuration) {
+    if (availableInputDuration + 0.05 < requiredBackgroundInputDuration) {
       shouldLoopBackgroundVideo = !backgroundIsStillImage;
     }
     renderOptions.backgroundEndTime = renderOptions.backgroundStartTime + renderDuration;
@@ -3407,6 +3407,7 @@ export async function renderJob(jobId: string) {
   }
 
   pushMediaInput(args, job.background_filepath, {
+    durationSeconds: requiredBackgroundInputDuration.toFixed(3),
     loop: backgroundIsStillImage || shouldLoopBackgroundVideo,
     loopStillImage: backgroundIsStillImage,
   });
@@ -3657,6 +3658,7 @@ export async function renderJob(jobId: string) {
     if (job.audio_start_offset_seconds && job.audio_start_offset_seconds > 0) {
       args.push("-ss", String(job.audio_start_offset_seconds));
     }
+    args.push("-t", renderDurationSeconds);
     args.push("-i", job.audio_filepath);
   }
 
@@ -3741,6 +3743,8 @@ export async function renderJob(jobId: string) {
     filterComplex,
     "-t",
     renderDurationSeconds,
+    "-frames:v",
+    String(Math.ceil(renderDuration * outputFps)),
     "-map",
     "[vout]",
   );
