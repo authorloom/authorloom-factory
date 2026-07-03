@@ -85,6 +85,11 @@ type VideoColorMetadata = {
   colorPrimaries?: string;
 };
 
+type BackgroundRenderClip = {
+  filepath: string;
+  temporary: boolean;
+};
+
 type Layout = {
   screenshotWidth: number;
   screenshotY: number;
@@ -547,6 +552,120 @@ function pushMediaInput(
     args.push("-f", "image2", "-loop", "1");
   }
   args.push("-i", filepath);
+}
+
+async function prepareBackgroundVideoForRender({
+  campaignId,
+  cropVariant,
+  durationSeconds,
+  filepath,
+  jobId,
+  loop,
+  startSeconds,
+  zoomLevel,
+}: {
+  campaignId: string;
+  cropVariant: string;
+  durationSeconds: number;
+  filepath: string;
+  jobId: string;
+  loop: boolean;
+  startSeconds: number;
+  zoomLevel: number;
+}): Promise<BackgroundRenderClip> {
+  if (isStillImageFile(filepath)) {
+    return {
+      filepath,
+      temporary: false,
+    };
+  }
+
+  const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
+  const outputFilepath = path.join(tempDirectory, `${jobId}-background.mp4`);
+  await fs.mkdir(tempDirectory, { recursive: true });
+
+  const scaledCanvasWidth = Math.round(canvasWidth * zoomLevel);
+  const scaledCanvasHeight = Math.round(canvasHeight * zoomLevel);
+  const cropX =
+    cropVariant === "left"
+      ? "0"
+      : cropVariant === "right"
+        ? "iw-ow"
+        : "(iw-ow)/2";
+  const cropY =
+    cropVariant === "top"
+      ? "0"
+      : cropVariant === "bottom"
+        ? "ih-oh"
+        : "(ih-oh)/2";
+  const filter =
+    `scale=${scaledCanvasWidth}:${scaledCanvasHeight}` +
+    `:force_original_aspect_ratio=increase` +
+    `:flags=fast_bilinear` +
+    `:in_range=auto` +
+    `:out_range=${outputColorRange}` +
+    `:out_color_matrix=${outputColorSpace},` +
+    `crop=${scaledCanvasWidth}:${scaledCanvasHeight}:${cropX}:${cropY},` +
+    `setsar=1,format=yuv420p`;
+  const args = ["-y", "-hide_banner", "-loglevel", "error"];
+
+  if (startSeconds > 0) {
+    args.push("-ss", String(startSeconds));
+  }
+  pushMediaInput(args, filepath, {
+    durationSeconds: durationSeconds.toFixed(3),
+    loop,
+  });
+  args.push(
+    "-vf",
+    filter,
+    "-an",
+    "-t",
+    durationSeconds.toFixed(3),
+    "-r",
+    String(outputFps),
+    "-vsync",
+    "cfr",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "ultrafast",
+    "-crf",
+    "24",
+    "-pix_fmt",
+    "yuv420p",
+    "-colorspace",
+    outputColorSpace,
+    "-color_primaries",
+    outputColorSpace,
+    "-color_trc",
+    outputColorSpace,
+    "-color_range",
+    outputColorRange,
+    "-movflags",
+    "+faststart",
+    outputFilepath,
+  );
+
+  console.log("Preparing background render clip:", {
+    jobId,
+    source: filepath,
+    output: outputFilepath,
+    durationSeconds: durationSeconds.toFixed(3),
+    startSeconds,
+    cropVariant,
+    zoomLevel,
+  });
+  await runCommand(ffmpegBinary, args, { ignoreOutput: true });
+  console.log("Prepared background render clip:", {
+    jobId,
+    output: outputFilepath,
+  });
+
+  return {
+    filepath: outputFilepath,
+    temporary: true,
+  };
 }
 
 async function prepareScreenshotForRender({
@@ -3211,6 +3330,13 @@ export async function renderJob(jobId: string) {
         return null;
       });
   const playbackSpeed = clampNumber(renderOptions.playbackSpeed, 0.95, 1.05, 1);
+  const effectiveRenderOptions = {
+    ...renderOptions,
+    ...renderOptionAdjustments(renderOptions.variationParameters),
+    ...renderOptionAdjustments(renderOptions.proofAdjustments),
+  };
+  const renderCropVariant = effectiveRenderOptions.cropVariant ?? "center";
+  const renderZoomLevel = clampNumber(effectiveRenderOptions.zoomLevel, 1, 1.08, 1);
   const audioStartOffset = Math.max(0, job.audio_start_offset_seconds ?? 0);
   const availableAudioDuration =
     audioDuration === null ? null : Math.max(0.5, audioDuration - audioStartOffset);
@@ -3284,13 +3410,26 @@ export async function renderJob(jobId: string) {
     (isCoverLayout || Boolean(customCoverBox) || layoutStudioHasElement(studioTemplate, "cover")) &&
     hasThumbnailFile;
   const renderDurationSeconds = String(renderDuration);
-
   const outputFilename = `${job.id}.mp4`;
   const outputDirectory = path.join(paths.rendersDirectory, job.campaign_id);
   const outputFilepath = path.join(outputDirectory, outputFilename);
 
   await fs.mkdir(outputDirectory, { recursive: true });
   markRenderJobRunning(job.id);
+
+  const preparedBackground = await prepareBackgroundVideoForRender({
+    campaignId: job.campaign_id,
+    cropVariant: renderCropVariant,
+    durationSeconds: requiredBackgroundInputDuration,
+    filepath: job.background_filepath,
+    jobId: job.id,
+    loop: shouldLoopBackgroundVideo,
+    startSeconds: Math.max(0, renderOptions.backgroundStartTime ?? 0),
+    zoomLevel: renderZoomLevel,
+  });
+  const backgroundColorMetadataForRender = preparedBackground.temporary
+    ? null
+    : backgroundColorMetadata;
 
   const hookOverlay = studioTemplate || isFullBackgroundMultiHook || (customTemplate && !customHookBox)
     ? null
@@ -3399,6 +3538,7 @@ export async function renderJob(jobId: string) {
   const args = ["-y", "-hide_banner", "-loglevel", "error"];
 
   if (
+    !preparedBackground.temporary &&
     !backgroundIsStillImage &&
     typeof renderOptions.backgroundStartTime === "number" &&
     renderOptions.backgroundStartTime > 0
@@ -3406,9 +3546,9 @@ export async function renderJob(jobId: string) {
     args.push("-ss", String(renderOptions.backgroundStartTime));
   }
 
-  pushMediaInput(args, job.background_filepath, {
+  pushMediaInput(args, preparedBackground.filepath, {
     durationSeconds: requiredBackgroundInputDuration.toFixed(3),
-    loop: backgroundIsStillImage || shouldLoopBackgroundVideo,
+    loop: backgroundIsStillImage || (!preparedBackground.temporary && shouldLoopBackgroundVideo),
     loopStillImage: backgroundIsStillImage,
   });
   pushMediaInput(args, preparedScreenshot.filepath, {
@@ -3664,7 +3804,7 @@ export async function renderJob(jobId: string) {
 
   const composedOutputLabel = "vcomposed";
   const mainFilterComplex = buildImageTextFilterComplex({
-    backgroundColorMetadata,
+    backgroundColorMetadata: backgroundColorMetadataForRender,
     layout:
       layout ?? {
         hookY: safeTop,
@@ -3805,6 +3945,7 @@ export async function renderJob(jobId: string) {
     console.log("Render job summary:", {
       jobId: job.id,
       background: job.background_filepath,
+      preparedBackground: preparedBackground.temporary ? preparedBackground.filepath : null,
       toneMapBackground: isHdrVideo(backgroundColorMetadata),
       screenshot: preparedScreenshot.filepath,
       screenshotDimensions,
