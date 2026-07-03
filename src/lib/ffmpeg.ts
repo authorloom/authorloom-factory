@@ -14,7 +14,7 @@ const minRenderDurationSeconds = 5;
 const maxRenderDurationSeconds = 8;
 const ffmpegTimeoutMs = Math.max(
   30_000,
-  Number(process.env.AUTHORLOOM_FFMPEG_TIMEOUT_MS ?? 420_000),
+  Number(process.env.AUTHORLOOM_FFMPEG_TIMEOUT_MS ?? 900_000),
 );
 
 const canvasWidth = 1080;
@@ -357,14 +357,14 @@ function sameRenderFilepath(left: string | null | undefined, right: string | nul
 async function runCommand(
   file: string,
   args: string[],
-  options: { all?: boolean; ignoreOutput?: boolean; maxBuffer?: number } = {},
+  options: { all?: boolean; ignoreOutput?: boolean; maxBuffer?: number; timeoutMs?: number } = {},
 ) {
   const { execa } = await import("execa");
-  const { ignoreOutput, ...execaOptions } = options;
+  const { ignoreOutput, timeoutMs, ...execaOptions } = options;
 
   return execa(file, args, {
     ...execaOptions,
-    timeout: ffmpegTimeoutMs,
+    timeout: timeoutMs ?? ffmpegTimeoutMs,
     killSignal: "SIGKILL",
     maxBuffer: ignoreOutput ? undefined : options.maxBuffer ?? 1_000_000,
     ...(ignoreOutput ? { stdout: "ignore" as const, stderr: "ignore" as const } : {}),
@@ -535,13 +535,16 @@ function isStillImageFile(filepath: string) {
 function pushMediaInput(
   args: string[],
   filepath: string,
-  options: { loop?: boolean; loopStillImage?: boolean } = {},
+  options: { durationSeconds?: number | string; loop?: boolean; loopStillImage?: boolean } = {},
 ) {
   if (options.loop && !isStillImageFile(filepath)) {
     args.push("-stream_loop", "-1");
   }
   if (options.loopStillImage && isStillImageFile(filepath)) {
     args.push("-f", "image2", "-loop", "1");
+    if (options.durationSeconds !== undefined) {
+      args.push("-t", String(options.durationSeconds));
+    }
   }
   args.push("-i", filepath);
 }
@@ -831,13 +834,13 @@ function buildImageTextFilterComplex({
       `format=yuv420p,` +
       `scale=${scaledCanvasWidth}:${scaledCanvasHeight}` +
       `:force_original_aspect_ratio=increase` +
-      `:flags=lanczos` +
+      `:flags=fast_bilinear` +
       `:in_range=${outputColorRange}` +
       `:out_range=${outputColorRange}` +
       `:out_color_matrix=${outputColorSpace}`
     : `scale=${scaledCanvasWidth}:${scaledCanvasHeight}` +
       `:force_original_aspect_ratio=increase` +
-      `:flags=lanczos` +
+      `:flags=fast_bilinear` +
       `:in_range=auto` +
       `:out_range=${outputColorRange}` +
       `:out_color_matrix=${outputColorSpace}`;
@@ -2672,7 +2675,10 @@ async function renderSlideImage(input: {
   const sceneBackgroundFilepath =
     sceneAssetFilepath(input.scene.assets?.background) || input.backgroundFilepath;
 
-  pushMediaInput(args, sceneBackgroundFilepath, { loopStillImage: true });
+  pushMediaInput(args, sceneBackgroundFilepath, {
+    durationSeconds: 1,
+    loopStillImage: true,
+  });
   let nextInputIndex = 1;
 
   const studioMediaOverlayInputs: StudioMediaOverlayInput[] = [];
@@ -2688,7 +2694,10 @@ async function renderSlideImage(input: {
       height: canvasHeight,
     }));
 
-    pushMediaInput(args, filepath, { loopStillImage: true });
+    pushMediaInput(args, filepath, {
+      durationSeconds: 1,
+      loopStillImage: true,
+    });
     studioMediaOverlayInputs.push({
       element,
       inputIndex: nextInputIndex,
@@ -2722,7 +2731,11 @@ async function renderSlideImage(input: {
       text,
     });
 
-    pushMediaInput(args, overlay.filepath, { loop: true, loopStillImage: true });
+    pushMediaInput(args, overlay.filepath, {
+      durationSeconds: 1,
+      loop: true,
+      loopStillImage: true,
+    });
     studioTextOverlayInputs.push({
       element: resolvedElement,
       height: overlay.height,
@@ -3398,6 +3411,7 @@ export async function renderJob(jobId: string) {
     loopStillImage: backgroundIsStillImage,
   });
   pushMediaInput(args, preparedScreenshot.filepath, {
+    durationSeconds: renderDurationSeconds,
     loop: true,
     loopStillImage: true,
   });
@@ -3408,6 +3422,7 @@ export async function renderJob(jobId: string) {
 
   if (hookOverlay) {
     pushMediaInput(args, hookOverlay.filepath, {
+      durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
     });
@@ -3419,6 +3434,7 @@ export async function renderJob(jobId: string) {
   if (timedHookOverlayEntries.length > 0) {
     timedHookOverlayEntries.forEach(({ overlay, timing }) => {
       pushMediaInput(args, overlay.filepath, {
+        durationSeconds: renderDurationSeconds,
         loop: true,
         loopStillImage: true,
       });
@@ -3439,6 +3455,7 @@ export async function renderJob(jobId: string) {
 
   if (postCopyOverlays.metadataOverlay) {
     pushMediaInput(args, postCopyOverlays.metadataOverlay.filepath, {
+      durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
     });
@@ -3451,6 +3468,7 @@ export async function renderJob(jobId: string) {
 
   if (postCopyOverlays.keywordsOverlay) {
     pushMediaInput(args, postCopyOverlays.keywordsOverlay.filepath, {
+      durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
     });
@@ -3461,6 +3479,7 @@ export async function renderJob(jobId: string) {
 
   if (hasCoverOverlay && job.thumbnail_filepath) {
     pushMediaInput(args, job.thumbnail_filepath, {
+      durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
     });
@@ -3475,6 +3494,7 @@ export async function renderJob(jobId: string) {
 
   if (introFilepath) {
     pushMediaInput(args, introFilepath, {
+      durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
     });
@@ -3489,6 +3509,7 @@ export async function renderJob(jobId: string) {
 
   if (outroFilepath) {
     pushMediaInput(args, outroFilepath, {
+      durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
     });
@@ -3500,6 +3521,7 @@ export async function renderJob(jobId: string) {
   if (studioTextOverlays.length > 0) {
     studioTextOverlays.forEach((overlay) => {
       pushMediaInput(args, overlay.filepath, {
+        durationSeconds: renderDurationSeconds,
         loop: true,
         loopStillImage: true,
       });
@@ -3552,6 +3574,7 @@ export async function renderJob(jobId: string) {
         if (sameRenderFilepath(filepath, job.background_filepath)) continue;
 
         pushMediaInput(args, filepath, {
+          durationSeconds: renderDurationSeconds,
           loop: true,
           loopStillImage: true,
         });
@@ -3586,6 +3609,7 @@ export async function renderJob(jobId: string) {
       );
 
       pushMediaInput(args, filepath, {
+        durationSeconds: renderDurationSeconds,
         loop: true,
         loopStillImage: true,
       });
@@ -3611,6 +3635,7 @@ export async function renderJob(jobId: string) {
     }));
 
     pushMediaInput(args, sceneVisual.filepath, {
+      durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
     });
