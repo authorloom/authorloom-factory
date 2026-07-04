@@ -5,6 +5,7 @@ import {
   layoutStudioCompositionDurationSeconds,
   resolveLayoutStudioElementsForRender,
   resolveLayoutStudioSceneTextElementForRender,
+  studioVideoTimelineDurationsForRender,
 } from "../ffmpeg";
 
 const screenshotElement = {
@@ -109,6 +110,33 @@ test("Layout Studio composition duration comes from composition timeline", () =>
       },
     }),
     12,
+  );
+});
+
+test("Layout Studio composition duration does not extend requested production duration", () => {
+  assert.equal(
+    studioVideoTimelineDurationsForRender(
+      {
+        ...template,
+        timeline: {
+          previewDurationSeconds: 7,
+        },
+        compositionTimeline: {
+          durationSeconds: 120,
+          clips: [
+            {
+              id: "background-clip",
+              layerType: "background",
+              startSeconds: 0,
+              durationSeconds: 120,
+            },
+          ],
+        },
+      },
+      7,
+      {},
+    ).mainDuration,
+    7,
   );
 });
 

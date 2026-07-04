@@ -24,7 +24,8 @@ const outputFps = 30;
 const outputVideoBitrate = "10M";
 const outputVideoMaxrate = "12M";
 const outputVideoBufsize = "20M";
-const outputVideoPreset = process.env.AUTHORLOOM_FFMPEG_VIDEO_PRESET ?? "veryfast";
+const outputVideoPreset =
+  process.env.AUTHORLOOM_FFMPEG_VIDEO_PRESET?.trim() || "veryfast";
 const outputAudioBitrate = "192k";
 const outputAudioSampleRate = "48000";
 const outputColorSpace = "bt709";
@@ -607,7 +608,7 @@ async function prepareBackgroundVideoForRender({
     `:out_color_matrix=${outputColorSpace},` +
     `crop=${scaledCanvasWidth}:${scaledCanvasHeight}:${cropX}:${cropY},` +
     `setsar=1,format=yuv420p`;
-  const args = ["-y", "-hide_banner", "-loglevel", "error"];
+  const args = ["-y", "-nostdin", "-hide_banner", "-loglevel", "error"];
 
   if (startSeconds > 0) {
     args.push("-ss", String(startSeconds));
@@ -1494,6 +1495,7 @@ async function layoutStudioMediaDimensionsByElementId({
   for (const clip of timelineClips) {
     const layerType = clip.layerType ?? "";
     if (!["screenshot", "image", "cover"].includes(layerType)) continue;
+    if (layerType === "screenshot") continue;
 
     const resolved = clip.id ? resolvedClips.get(clip.id) : null;
     const filepath = resolved?.asset?.filepath ?? null;
@@ -2884,6 +2886,8 @@ async function renderSlideImage(input: {
   ].join(";");
 
   args.push(
+    "-filter_complex_threads",
+    "1",
     "-filter_complex",
     filterComplex,
     "-frames:v",
@@ -3096,14 +3100,16 @@ function fontCandidatesForStudioElement(element: LayoutStudioElement) {
   return copyFontCandidates();
 }
 
-function studioVideoTimelineDurations(
+export function studioVideoTimelineDurationsForRender(
   template: CanvasLayoutTemplate | null,
   requestedMainDuration: number,
   options: RenderOptions,
 ) {
   const timeline = template?.timeline;
   const compositionDuration = layoutStudioCompositionDurationSeconds(template);
-  const resolvedMainDuration = compositionDuration ?? requestedMainDuration;
+  const resolvedMainDuration = compositionDuration
+    ? Math.min(compositionDuration, requestedMainDuration)
+    : requestedMainDuration;
   const mainDuration = clampNumber(resolvedMainDuration, 0.1, 30, resolvedMainDuration);
   const introDurationOverride = options.layoutStudioAssets?.introDurationSeconds ?? null;
   const outroDurationOverride = options.layoutStudioAssets?.outroDurationSeconds ?? null;
@@ -3348,7 +3354,7 @@ export async function renderJob(jobId: string) {
         studioTemplate ? 30 : maxRenderDurationSeconds,
         getRandomRenderDurationSeconds(),
       );
-  const studioTimelineDurations = studioVideoTimelineDurations(
+  const studioTimelineDurations = studioVideoTimelineDurationsForRender(
     studioTemplate,
     requestedMainRenderDuration,
     renderOptions,
@@ -3712,7 +3718,13 @@ export async function renderJob(jobId: string) {
       if (layerType === "background") {
         const filepath = resolved?.asset?.filepath ?? null;
         if (!filepath || !(await fileExists(filepath))) continue;
-        if (sameRenderFilepath(filepath, job.background_filepath)) continue;
+        if (sameRenderFilepath(filepath, job.background_filepath)) {
+          console.log("Skipping duplicate Studio background overlay input", {
+            jobId: job.id,
+            filepath,
+          });
+          continue;
+        }
 
         pushMediaInput(args, filepath, {
           durationSeconds: renderDurationSeconds,
@@ -3730,6 +3742,12 @@ export async function renderJob(jobId: string) {
       }
 
       if (!["screenshot", "image", "cover"].includes(layerType)) continue;
+
+      // The Studio screenshot element is already rendered from the prepared
+      // screenshot input in buildLayoutStudioFilterComplex. Feeding timeline
+      // screenshot clips as additional looped image inputs makes the final
+      // overlay graph much heavier and can leave ffmpeg stuck in framesync.
+      if (layerType === "screenshot") continue;
 
       const element =
         (clip.elementId ? elementById.get(clip.elementId) : null) ??
