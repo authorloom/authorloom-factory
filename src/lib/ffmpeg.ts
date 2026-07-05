@@ -26,6 +26,15 @@ const outputVideoMaxrate = "12M";
 const outputVideoBufsize = "20M";
 const outputVideoPreset =
   process.env.AUTHORLOOM_FFMPEG_VIDEO_PRESET?.trim() || "veryfast";
+const filterComplexThreadsRaw =
+  process.env.AUTHORLOOM_FFMPEG_FILTER_COMPLEX_THREADS?.trim() ?? "";
+const filterComplexThreadsNumber = Number(filterComplexThreadsRaw);
+const filterComplexThreads =
+  filterComplexThreadsRaw &&
+  Number.isFinite(filterComplexThreadsNumber) &&
+  filterComplexThreadsNumber > 0
+    ? String(Math.floor(filterComplexThreadsNumber))
+    : null;
 const outputAudioBitrate = "192k";
 const outputAudioSampleRate = "48000";
 const outputColorSpace = "bt709";
@@ -553,6 +562,13 @@ function pushMediaInput(
     args.push("-f", "image2", "-loop", "1");
   }
   args.push("-i", filepath);
+}
+
+function pushFilterComplexInput(args: string[], filterComplex: string) {
+  if (filterComplexThreads) {
+    args.push("-filter_complex_threads", filterComplexThreads);
+  }
+  args.push("-filter_complex", filterComplex);
 }
 
 async function prepareBackgroundVideoForRender({
@@ -2885,11 +2901,8 @@ async function renderSlideImage(input: {
     `[${composedOutputLabel}]scale=${canvasWidth}:${canvasHeight}:flags=lanczos,setsar=1,format=rgba[vout]`,
   ].join(";");
 
+  pushFilterComplexInput(args, filterComplex);
   args.push(
-    "-filter_complex_threads",
-    "1",
-    "-filter_complex",
-    filterComplex,
     "-frames:v",
     "1",
     "-map",
@@ -3896,11 +3909,8 @@ export async function renderJob(jobId: string) {
     `[${composedOutputLabel}]scale=${canvasWidth}:${canvasHeight}:flags=lanczos:in_range=${outputColorRange}:out_range=${outputColorRange}:out_color_matrix=${outputColorSpace},setsar=1,format=yuv420p[vout]`,
   ].join(";");
 
+  pushFilterComplexInput(args, filterComplex);
   args.push(
-    "-filter_complex_threads",
-    "1",
-    "-filter_complex",
-    filterComplex,
     "-t",
     renderDurationSeconds,
     "-frames:v",
@@ -3988,6 +3998,7 @@ export async function renderJob(jobId: string) {
       filterLength: filterComplex.length,
       output: outputFilepath,
       preset: outputVideoPreset,
+      filterComplexThreads: filterComplexThreads ?? "auto",
     });
 
     await runCommand(ffmpegBinary, args, { ignoreOutput: true });
