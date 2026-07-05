@@ -14,7 +14,7 @@ const minRenderDurationSeconds = 5;
 const maxRenderDurationSeconds = 8;
 const ffmpegTimeoutMs = Math.max(
   30_000,
-  Number(process.env.AUTHORLOOM_FFMPEG_TIMEOUT_MS ?? 420_000),
+  Number(process.env.AUTHORLOOM_FFMPEG_TIMEOUT_MS ?? 900_000),
 );
 
 const canvasWidth = 1080;
@@ -24,6 +24,8 @@ const outputFps = 30;
 const outputVideoBitrate = "10M";
 const outputVideoMaxrate = "12M";
 const outputVideoBufsize = "20M";
+const outputVideoPreset =
+  process.env.AUTHORLOOM_FFMPEG_VIDEO_PRESET?.trim() || "veryfast";
 const outputAudioBitrate = "192k";
 const outputAudioSampleRate = "48000";
 const outputColorSpace = "bt709";
@@ -82,6 +84,11 @@ type VideoColorMetadata = {
   colorSpace?: string;
   colorTransfer?: string;
   colorPrimaries?: string;
+};
+
+type BackgroundRenderClip = {
+  filepath: string;
+  temporary: boolean;
 };
 
 type Layout = {
@@ -348,16 +355,25 @@ type StudioBackgroundOverlayInput = OverlayInput & {
   endSeconds: number;
 };
 
+function sameRenderFilepath(left: string | null | undefined, right: string | null | undefined) {
+  if (!left || !right) return false;
+  return path.resolve(left) === path.resolve(right);
+}
+
 async function runCommand(
   file: string,
   args: string[],
-  options: { all?: boolean } = {},
+  options: { all?: boolean; ignoreOutput?: boolean; maxBuffer?: number; timeoutMs?: number } = {},
 ) {
   const { execa } = await import("execa");
+  const { ignoreOutput, timeoutMs, ...execaOptions } = options;
+
   return execa(file, args, {
-    ...options,
-    timeout: ffmpegTimeoutMs,
+    ...execaOptions,
+    timeout: timeoutMs ?? ffmpegTimeoutMs,
     killSignal: "SIGKILL",
+    maxBuffer: ignoreOutput ? undefined : options.maxBuffer ?? 1_000_000,
+    ...(ignoreOutput ? { stdout: "ignore" as const, stderr: "ignore" as const } : {}),
   });
 }
 
@@ -432,7 +448,7 @@ async function getMediaDurationSeconds(filepath: string): Promise<number | null>
     ],
     { all: true },
   );
-  const duration = Number.parseFloat(result.stdout.trim());
+  const duration = Number.parseFloat((result.stdout ?? "").trim());
 
   return Number.isFinite(duration) && duration > 0 ? duration : null;
 }
@@ -525,15 +541,132 @@ function isStillImageFile(filepath: string) {
 function pushMediaInput(
   args: string[],
   filepath: string,
-  options: { loop?: boolean; loopStillImage?: boolean } = {},
+  options: { durationSeconds?: number | string; loop?: boolean; loopStillImage?: boolean } = {},
 ) {
   if (options.loop && !isStillImageFile(filepath)) {
     args.push("-stream_loop", "-1");
+  }
+  if (options.durationSeconds !== undefined) {
+    args.push("-t", String(options.durationSeconds));
   }
   if (options.loopStillImage && isStillImageFile(filepath)) {
     args.push("-f", "image2", "-loop", "1");
   }
   args.push("-i", filepath);
+}
+
+async function prepareBackgroundVideoForRender({
+  campaignId,
+  cropVariant,
+  durationSeconds,
+  filepath,
+  jobId,
+  loop,
+  startSeconds,
+  zoomLevel,
+}: {
+  campaignId: string;
+  cropVariant: string;
+  durationSeconds: number;
+  filepath: string;
+  jobId: string;
+  loop: boolean;
+  startSeconds: number;
+  zoomLevel: number;
+}): Promise<BackgroundRenderClip> {
+  if (isStillImageFile(filepath)) {
+    return {
+      filepath,
+      temporary: false,
+    };
+  }
+
+  const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
+  const outputFilepath = path.join(tempDirectory, `${jobId}-background.mp4`);
+  await fs.mkdir(tempDirectory, { recursive: true });
+
+  const scaledCanvasWidth = Math.round(canvasWidth * zoomLevel);
+  const scaledCanvasHeight = Math.round(canvasHeight * zoomLevel);
+  const cropX =
+    cropVariant === "left"
+      ? "0"
+      : cropVariant === "right"
+        ? "iw-ow"
+        : "(iw-ow)/2";
+  const cropY =
+    cropVariant === "top"
+      ? "0"
+      : cropVariant === "bottom"
+        ? "ih-oh"
+        : "(ih-oh)/2";
+  const filter =
+    `scale=${scaledCanvasWidth}:${scaledCanvasHeight}` +
+    `:force_original_aspect_ratio=increase` +
+    `:flags=fast_bilinear` +
+    `:in_range=auto` +
+    `:out_range=${outputColorRange}` +
+    `:out_color_matrix=${outputColorSpace},` +
+    `crop=${scaledCanvasWidth}:${scaledCanvasHeight}:${cropX}:${cropY},` +
+    `setsar=1,format=yuv420p`;
+  const args = ["-y", "-nostdin", "-hide_banner", "-loglevel", "error"];
+
+  if (startSeconds > 0) {
+    args.push("-ss", String(startSeconds));
+  }
+  pushMediaInput(args, filepath, {
+    durationSeconds: durationSeconds.toFixed(3),
+    loop,
+  });
+  args.push(
+    "-vf",
+    filter,
+    "-an",
+    "-t",
+    durationSeconds.toFixed(3),
+    "-r",
+    String(outputFps),
+    "-vsync",
+    "cfr",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "ultrafast",
+    "-crf",
+    "24",
+    "-pix_fmt",
+    "yuv420p",
+    "-colorspace",
+    outputColorSpace,
+    "-color_primaries",
+    outputColorSpace,
+    "-color_trc",
+    outputColorSpace,
+    "-color_range",
+    outputColorRange,
+    "-movflags",
+    "+faststart",
+    outputFilepath,
+  );
+
+  console.log("Preparing background render clip:", {
+    jobId,
+    source: filepath,
+    output: outputFilepath,
+    durationSeconds: durationSeconds.toFixed(3),
+    startSeconds,
+    cropVariant,
+    zoomLevel,
+  });
+  await runCommand(ffmpegBinary, args, { ignoreOutput: true });
+  console.log("Prepared background render clip:", {
+    jobId,
+    output: outputFilepath,
+  });
+
+  return {
+    filepath: outputFilepath,
+    temporary: true,
+  };
 }
 
 async function prepareScreenshotForRender({
@@ -821,13 +954,13 @@ function buildImageTextFilterComplex({
       `format=yuv420p,` +
       `scale=${scaledCanvasWidth}:${scaledCanvasHeight}` +
       `:force_original_aspect_ratio=increase` +
-      `:flags=lanczos` +
+      `:flags=fast_bilinear` +
       `:in_range=${outputColorRange}` +
       `:out_range=${outputColorRange}` +
       `:out_color_matrix=${outputColorSpace}`
     : `scale=${scaledCanvasWidth}:${scaledCanvasHeight}` +
       `:force_original_aspect_ratio=increase` +
-      `:flags=lanczos` +
+      `:flags=fast_bilinear` +
       `:in_range=auto` +
       `:out_range=${outputColorRange}` +
       `:out_color_matrix=${outputColorSpace}`;
@@ -1274,6 +1407,25 @@ function timelineClipEndSeconds(clip: { startSeconds?: number; durationSeconds?:
   const startSeconds = clampNumber(clip.startSeconds, 0, 3600, 0);
   const durationSeconds = clampNumber(clip.durationSeconds, 0.01, 3600, 0.01);
   return startSeconds + durationSeconds;
+}
+
+export function layoutStudioCompositionDurationSeconds(
+  template: CanvasLayoutTemplate | null | undefined,
+) {
+  const explicitDuration = clampNumber(
+    template?.compositionTimeline?.durationSeconds,
+    0.1,
+    3600,
+    0,
+  );
+  if (explicitDuration > 0) return explicitDuration;
+
+  const duration = layoutStudioTimelineClips(template).reduce(
+    (max, clip) => Math.max(max, timelineClipEndSeconds(clip)),
+    0,
+  );
+
+  return duration > 0 ? duration : null;
 }
 
 function resolvedTimelineClipById(options: RenderOptions) {
@@ -2640,11 +2792,14 @@ async function renderSlideImage(input: {
   const elementByKey = new Map(
     resolvedElements.map((element) => [studioElementKey(element), element]),
   );
-  const args = ["-y"];
+  const args = ["-y", "-hide_banner", "-loglevel", "error"];
   const sceneBackgroundFilepath =
     sceneAssetFilepath(input.scene.assets?.background) || input.backgroundFilepath;
 
-  pushMediaInput(args, sceneBackgroundFilepath, { loopStillImage: true });
+  pushMediaInput(args, sceneBackgroundFilepath, {
+    durationSeconds: 1,
+    loopStillImage: true,
+  });
   let nextInputIndex = 1;
 
   const studioMediaOverlayInputs: StudioMediaOverlayInput[] = [];
@@ -2660,7 +2815,10 @@ async function renderSlideImage(input: {
       height: canvasHeight,
     }));
 
-    pushMediaInput(args, filepath, { loopStillImage: true });
+    pushMediaInput(args, filepath, {
+      durationSeconds: 1,
+      loopStillImage: true,
+    });
     studioMediaOverlayInputs.push({
       element,
       inputIndex: nextInputIndex,
@@ -2694,7 +2852,11 @@ async function renderSlideImage(input: {
       text,
     });
 
-    pushMediaInput(args, overlay.filepath, { loop: true, loopStillImage: true });
+    pushMediaInput(args, overlay.filepath, {
+      durationSeconds: 1,
+      loop: true,
+      loopStillImage: true,
+    });
     studioTextOverlayInputs.push({
       element: resolvedElement,
       height: overlay.height,
@@ -2724,6 +2886,8 @@ async function renderSlideImage(input: {
   ].join(";");
 
   args.push(
+    "-filter_complex_threads",
+    "1",
     "-filter_complex",
     filterComplex,
     "-frames:v",
@@ -2733,7 +2897,7 @@ async function renderSlideImage(input: {
     input.outputFilepath,
   );
 
-  await runCommand(ffmpegBinary, args, { all: true });
+  await runCommand(ffmpegBinary, args, { ignoreOutput: true });
 }
 
 async function renderSlidePostJob(input: {
@@ -2936,13 +3100,17 @@ function fontCandidatesForStudioElement(element: LayoutStudioElement) {
   return copyFontCandidates();
 }
 
-function studioVideoTimelineDurations(
+export function studioVideoTimelineDurationsForRender(
   template: CanvasLayoutTemplate | null,
   requestedMainDuration: number,
   options: RenderOptions,
 ) {
   const timeline = template?.timeline;
-  const mainDuration = clampNumber(requestedMainDuration, 0.1, 30, requestedMainDuration);
+  const compositionDuration = layoutStudioCompositionDurationSeconds(template);
+  const resolvedMainDuration = compositionDuration
+    ? Math.min(compositionDuration, requestedMainDuration)
+    : requestedMainDuration;
+  const mainDuration = clampNumber(resolvedMainDuration, 0.1, 30, resolvedMainDuration);
   const introDurationOverride = options.layoutStudioAssets?.introDurationSeconds ?? null;
   const outroDurationOverride = options.layoutStudioAssets?.outroDurationSeconds ?? null;
   const introDuration = timeline?.introEnabled
@@ -3168,6 +3336,13 @@ export async function renderJob(jobId: string) {
         return null;
       });
   const playbackSpeed = clampNumber(renderOptions.playbackSpeed, 0.95, 1.05, 1);
+  const effectiveRenderOptions = {
+    ...renderOptions,
+    ...renderOptionAdjustments(renderOptions.variationParameters),
+    ...renderOptionAdjustments(renderOptions.proofAdjustments),
+  };
+  const renderCropVariant = effectiveRenderOptions.cropVariant ?? "center";
+  const renderZoomLevel = clampNumber(effectiveRenderOptions.zoomLevel, 1, 1.08, 1);
   const audioStartOffset = Math.max(0, job.audio_start_offset_seconds ?? 0);
   const availableAudioDuration =
     audioDuration === null ? null : Math.max(0.5, audioDuration - audioStartOffset);
@@ -3179,7 +3354,7 @@ export async function renderJob(jobId: string) {
         studioTemplate ? 30 : maxRenderDurationSeconds,
         getRandomRenderDurationSeconds(),
       );
-  const studioTimelineDurations = studioVideoTimelineDurations(
+  const studioTimelineDurations = studioVideoTimelineDurationsForRender(
     studioTemplate,
     requestedMainRenderDuration,
     renderOptions,
@@ -3196,13 +3371,13 @@ export async function renderJob(jobId: string) {
   let studioMainDuration = studioTemplate ? studioTimelineDurations.mainDuration : renderDuration;
   let studioOutroDuration = studioTemplate ? studioTimelineDurations.outroDuration : 0;
   let shouldLoopBackgroundVideo = false;
+  const requiredBackgroundInputDuration = renderDuration * playbackSpeed;
 
   if (backgroundDuration !== null) {
     const requestedBackgroundStart = Math.max(0, renderOptions.backgroundStartTime ?? 0);
-    const requiredInputDuration = renderDuration * playbackSpeed;
     const latestBackgroundStart = backgroundIsStillImage
       ? requestedBackgroundStart
-      : Math.max(0, backgroundDuration - requiredInputDuration);
+      : Math.max(0, backgroundDuration - requiredBackgroundInputDuration);
     renderOptions.backgroundStartTime = Math.min(
       requestedBackgroundStart,
       latestBackgroundStart,
@@ -3212,7 +3387,7 @@ export async function renderJob(jobId: string) {
       backgroundDuration - renderOptions.backgroundStartTime,
     );
 
-    if (availableInputDuration + 0.05 < requiredInputDuration) {
+    if (availableInputDuration + 0.05 < requiredBackgroundInputDuration) {
       shouldLoopBackgroundVideo = !backgroundIsStillImage;
     }
     renderOptions.backgroundEndTime = renderOptions.backgroundStartTime + renderDuration;
@@ -3241,13 +3416,26 @@ export async function renderJob(jobId: string) {
     (isCoverLayout || Boolean(customCoverBox) || layoutStudioHasElement(studioTemplate, "cover")) &&
     hasThumbnailFile;
   const renderDurationSeconds = String(renderDuration);
-
   const outputFilename = `${job.id}.mp4`;
   const outputDirectory = path.join(paths.rendersDirectory, job.campaign_id);
   const outputFilepath = path.join(outputDirectory, outputFilename);
 
   await fs.mkdir(outputDirectory, { recursive: true });
   markRenderJobRunning(job.id);
+
+  const preparedBackground = await prepareBackgroundVideoForRender({
+    campaignId: job.campaign_id,
+    cropVariant: renderCropVariant,
+    durationSeconds: requiredBackgroundInputDuration,
+    filepath: job.background_filepath,
+    jobId: job.id,
+    loop: shouldLoopBackgroundVideo,
+    startSeconds: Math.max(0, renderOptions.backgroundStartTime ?? 0),
+    zoomLevel: renderZoomLevel,
+  });
+  const backgroundColorMetadataForRender = preparedBackground.temporary
+    ? null
+    : backgroundColorMetadata;
 
   const hookOverlay = studioTemplate || isFullBackgroundMultiHook || (customTemplate && !customHookBox)
     ? null
@@ -3353,9 +3541,10 @@ export async function renderJob(jobId: string) {
         })
     : null;
 
-  const args = ["-y"];
+  const args = ["-y", "-hide_banner", "-loglevel", "error"];
 
   if (
+    !preparedBackground.temporary &&
     !backgroundIsStillImage &&
     typeof renderOptions.backgroundStartTime === "number" &&
     renderOptions.backgroundStartTime > 0
@@ -3363,11 +3552,13 @@ export async function renderJob(jobId: string) {
     args.push("-ss", String(renderOptions.backgroundStartTime));
   }
 
-  pushMediaInput(args, job.background_filepath, {
-    loop: backgroundIsStillImage || shouldLoopBackgroundVideo,
+  pushMediaInput(args, preparedBackground.filepath, {
+    durationSeconds: requiredBackgroundInputDuration.toFixed(3),
+    loop: backgroundIsStillImage || (!preparedBackground.temporary && shouldLoopBackgroundVideo),
     loopStillImage: backgroundIsStillImage,
   });
   pushMediaInput(args, preparedScreenshot.filepath, {
+    durationSeconds: renderDurationSeconds,
     loop: true,
     loopStillImage: true,
   });
@@ -3378,6 +3569,7 @@ export async function renderJob(jobId: string) {
 
   if (hookOverlay) {
     pushMediaInput(args, hookOverlay.filepath, {
+      durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
     });
@@ -3389,6 +3581,7 @@ export async function renderJob(jobId: string) {
   if (timedHookOverlayEntries.length > 0) {
     timedHookOverlayEntries.forEach(({ overlay, timing }) => {
       pushMediaInput(args, overlay.filepath, {
+        durationSeconds: renderDurationSeconds,
         loop: true,
         loopStillImage: true,
       });
@@ -3409,6 +3602,7 @@ export async function renderJob(jobId: string) {
 
   if (postCopyOverlays.metadataOverlay) {
     pushMediaInput(args, postCopyOverlays.metadataOverlay.filepath, {
+      durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
     });
@@ -3421,6 +3615,7 @@ export async function renderJob(jobId: string) {
 
   if (postCopyOverlays.keywordsOverlay) {
     pushMediaInput(args, postCopyOverlays.keywordsOverlay.filepath, {
+      durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
     });
@@ -3431,6 +3626,7 @@ export async function renderJob(jobId: string) {
 
   if (hasCoverOverlay && job.thumbnail_filepath) {
     pushMediaInput(args, job.thumbnail_filepath, {
+      durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
     });
@@ -3445,6 +3641,7 @@ export async function renderJob(jobId: string) {
 
   if (introFilepath) {
     pushMediaInput(args, introFilepath, {
+      durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
     });
@@ -3459,6 +3656,7 @@ export async function renderJob(jobId: string) {
 
   if (outroFilepath) {
     pushMediaInput(args, outroFilepath, {
+      durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
     });
@@ -3470,6 +3668,7 @@ export async function renderJob(jobId: string) {
   if (studioTextOverlays.length > 0) {
     studioTextOverlays.forEach((overlay) => {
       pushMediaInput(args, overlay.filepath, {
+        durationSeconds: renderDurationSeconds,
         loop: true,
         loopStillImage: true,
       });
@@ -3519,8 +3718,16 @@ export async function renderJob(jobId: string) {
       if (layerType === "background") {
         const filepath = resolved?.asset?.filepath ?? null;
         if (!filepath || !(await fileExists(filepath))) continue;
+        if (sameRenderFilepath(filepath, job.background_filepath)) {
+          console.log("Skipping duplicate Studio background overlay input", {
+            jobId: job.id,
+            filepath,
+          });
+          continue;
+        }
 
         pushMediaInput(args, filepath, {
+          durationSeconds: renderDurationSeconds,
           loop: true,
           loopStillImage: true,
         });
@@ -3536,24 +3743,32 @@ export async function renderJob(jobId: string) {
 
       if (!["screenshot", "image", "cover"].includes(layerType)) continue;
 
+      // The Studio screenshot element is already rendered from the prepared
+      // screenshot input in buildLayoutStudioFilterComplex. Feeding timeline
+      // screenshot clips as additional looped image inputs makes the final
+      // overlay graph much heavier and can leave ffmpeg stuck in framesync.
+      if (layerType === "screenshot") continue;
+
       const element =
         (clip.elementId ? elementById.get(clip.elementId) : null) ??
         (fallbackElementsByType.get(layerType) ?? [])[0];
       if (!element) continue;
       const filepath =
         layerType === "screenshot"
-          ? preparedScreenshot.filepath
+          ? resolved?.asset?.filepath ?? preparedScreenshot.filepath
           : resolved?.asset?.filepath ?? null;
       if (!filepath || !(await fileExists(filepath))) continue;
-      const dimensions =
+      const dimensions = await getMediaDimensions(filepath).catch(() =>
         layerType === "screenshot"
           ? screenshotDimensions
-          : await getMediaDimensions(filepath).catch(() => ({
+          : {
               width: canvasWidth,
               height: canvasHeight,
-            }));
+            },
+      );
 
       pushMediaInput(args, filepath, {
+        durationSeconds: renderDurationSeconds,
         loop: true,
         loopStillImage: true,
       });
@@ -3579,6 +3794,7 @@ export async function renderJob(jobId: string) {
     }));
 
     pushMediaInput(args, sceneVisual.filepath, {
+      durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
     });
@@ -3600,12 +3816,13 @@ export async function renderJob(jobId: string) {
     if (job.audio_start_offset_seconds && job.audio_start_offset_seconds > 0) {
       args.push("-ss", String(job.audio_start_offset_seconds));
     }
+    args.push("-t", renderDurationSeconds);
     args.push("-i", job.audio_filepath);
   }
 
   const composedOutputLabel = "vcomposed";
   const mainFilterComplex = buildImageTextFilterComplex({
-    backgroundColorMetadata,
+    backgroundColorMetadata: backgroundColorMetadataForRender,
     layout:
       layout ?? {
         hookY: safeTop,
@@ -3680,10 +3897,14 @@ export async function renderJob(jobId: string) {
   ].join(";");
 
   args.push(
+    "-filter_complex_threads",
+    "1",
     "-filter_complex",
     filterComplex,
     "-t",
     renderDurationSeconds,
+    "-frames:v",
+    String(Math.ceil(renderDuration * outputFps)),
     "-map",
     "[vout]",
   );
@@ -3712,7 +3933,7 @@ export async function renderJob(jobId: string) {
     "-c:v",
     "libx264",
     "-preset",
-    "medium",
+    outputVideoPreset,
     "-profile:v",
     "high",
     "-level:v",
@@ -3741,36 +3962,35 @@ export async function renderJob(jobId: string) {
   );
 
   try {
-    console.log("Render job inputs:", {
+    console.log("Render job summary:", {
       jobId: job.id,
       background: job.background_filepath,
-      backgroundColorMetadata,
+      preparedBackground: preparedBackground.temporary ? preparedBackground.filepath : null,
       toneMapBackground: isHdrVideo(backgroundColorMetadata),
       screenshot: preparedScreenshot.filepath,
-      originalScreenshot: job.screenshot_filepath,
       screenshotDimensions,
       audio: job.audio_filepath,
-      thumbnail: null,
       output: outputFilepath,
       renderDurationSeconds,
-      thumbnailIntroDuration: null,
-      hookOverlay,
-      timedHookOverlays: timedHookOverlayEntries.map((entry) => entry.overlay),
-      sceneVisualOverlayInputs,
-      studioTextOverlays,
-      layout,
-      renderOptions,
-      postCopyOverlays,
-      safeArea: {
-        safeTop,
-        safeBottom,
-        safeContentBottom,
-      },
+      timedHookOverlayCount: timedHookOverlayEntries.length,
+      sceneVisualOverlayCount: sceneVisualOverlayInputs.length,
+      studioTextOverlayCount: studioTextOverlays.length,
+      studioBackgroundOverlayCount: studioBackgroundOverlayInputs.length,
+      studioMediaOverlayCount: studioMediaOverlayInputs.length,
+      layoutTemplateId: renderOptions.layoutTemplateId,
+      durationSeconds: renderOptions.durationSeconds,
+      cropVariant: renderOptions.variationParameters?.cropVariant,
     });
 
-    console.log("FFmpeg args:", args.join(" "));
+    console.log("FFmpeg render command:", {
+      jobId: job.id,
+      inputCount: nextInputIndex,
+      filterLength: filterComplex.length,
+      output: outputFilepath,
+      preset: outputVideoPreset,
+    });
 
-    await runCommand(ffmpegBinary, args, { all: true });
+    await runCommand(ffmpegBinary, args, { ignoreOutput: true });
 
     const [outputStat, outputDuration] = await Promise.all([
       fs.stat(outputFilepath),

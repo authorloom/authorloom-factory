@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  layoutStudioCompositionDurationSeconds,
   resolveLayoutStudioElementsForRender,
   resolveLayoutStudioSceneTextElementForRender,
+  studioVideoTimelineDurationsForRender,
 } from "../ffmpeg";
 
 const screenshotElement = {
@@ -85,6 +87,56 @@ test("Layout Studio templates with scene-only elements resolve as renderable Stu
   assert.deepEqual(
     elements.map((element) => element.id),
     ["screenshot-1", "hook-1", "keywords-1"],
+  );
+});
+
+test("Layout Studio composition duration comes from composition timeline", () => {
+  assert.equal(
+    layoutStudioCompositionDurationSeconds({
+      ...template,
+      timeline: {
+        previewDurationSeconds: 7,
+      },
+      compositionTimeline: {
+        durationSeconds: 12,
+        clips: [
+          {
+            id: "screenshot-clip",
+            layerType: "asset",
+            startSeconds: 0,
+            durationSeconds: 12,
+          },
+        ],
+      },
+    }),
+    12,
+  );
+});
+
+test("Layout Studio composition duration does not extend requested production duration", () => {
+  assert.equal(
+    studioVideoTimelineDurationsForRender(
+      {
+        ...template,
+        timeline: {
+          previewDurationSeconds: 7,
+        },
+        compositionTimeline: {
+          durationSeconds: 120,
+          clips: [
+            {
+              id: "background-clip",
+              layerType: "background",
+              startSeconds: 0,
+              durationSeconds: 120,
+            },
+          ],
+        },
+      },
+      7,
+      {},
+    ).mainDuration,
+    7,
   );
 });
 
