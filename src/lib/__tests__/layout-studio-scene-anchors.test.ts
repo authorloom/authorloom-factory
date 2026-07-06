@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  isLayoutStudioTimelineMediaOverlayLayer,
   layoutStudioCompositionDurationSeconds,
   resolveLayoutStudioElementsForRender,
   resolveLayoutStudioSceneTextElementForRender,
@@ -138,6 +139,12 @@ test("Layout Studio composition duration does not extend requested production du
     ).mainDuration,
     7,
   );
+});
+
+test("Layout Studio screenshot timeline clips do not become duplicate media overlays", () => {
+  assert.equal(isLayoutStudioTimelineMediaOverlayLayer("screenshot"), false);
+  assert.equal(isLayoutStudioTimelineMediaOverlayLayer("image"), true);
+  assert.equal(isLayoutStudioTimelineMediaOverlayLayer("cover"), true);
 });
 
 test("hook stacked above screenshot uses tall screenshot rendered box", async () => {

@@ -1603,6 +1603,10 @@ function timelineClipEndSeconds(clip: { startSeconds?: number; durationSeconds?:
   return startSeconds + durationSeconds;
 }
 
+export function isLayoutStudioTimelineMediaOverlayLayer(layerType: string | null | undefined) {
+  return layerType === "image" || layerType === "cover";
+}
+
 export function layoutStudioCompositionDurationSeconds(
   template: CanvasLayoutTemplate | null | undefined,
 ) {
@@ -1688,8 +1692,7 @@ async function layoutStudioMediaDimensionsByElementId({
   const timelineClips = layoutStudioTimelineClips(studioTemplate);
   for (const clip of timelineClips) {
     const layerType = clip.layerType ?? "";
-    if (!["screenshot", "image", "cover"].includes(layerType)) continue;
-    if (layerType === "screenshot") continue;
+    if (!isLayoutStudioTimelineMediaOverlayLayer(layerType)) continue;
 
     const resolved = clip.id ? resolvedClips.get(clip.id) : null;
     const filepath = resolved?.asset?.filepath ?? null;
@@ -3932,24 +3935,12 @@ export async function renderJob(jobId: string) {
         continue;
       }
 
-      if (!["screenshot", "image", "cover"].includes(layerType)) continue;
+      if (!isLayoutStudioTimelineMediaOverlayLayer(layerType)) continue;
 
       const element =
         (clip.elementId ? elementById.get(clip.elementId) : null) ??
         (fallbackElementsByType.get(layerType) ?? [])[0];
       if (!element) continue;
-
-      if (layerType === "screenshot") {
-        studioMediaOverlayInputs.push({
-          element,
-          inputIndex: 1,
-          width: screenshotDimensions.width,
-          height: screenshotDimensions.height,
-          startSeconds,
-          endSeconds,
-        });
-        continue;
-      }
 
       const filepath =
         resolved?.asset?.filepath ?? null;
