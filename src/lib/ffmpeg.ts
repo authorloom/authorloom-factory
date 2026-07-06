@@ -584,9 +584,12 @@ function finiteTimelineInputPrefix(
   const start = clampNumber(startSeconds, 0, 3600, 0);
   const duration = Math.max(0.01, endSeconds - start);
   const speed = clampNumber(playbackSpeed, 0.1, 10, 1);
-  const timestampOffset = start > 0.001 ? `+${start.toFixed(3)}/TB` : "";
+  const startPad =
+    start > 0.001
+      ? `tpad=start_duration=${start.toFixed(3)}:start_mode=add:color=black,`
+      : "";
 
-  return `${inputLabel}trim=start=0:duration=${duration.toFixed(3)},setpts=${(1 / speed).toFixed(5)}*(PTS-STARTPTS)${timestampOffset},`;
+  return `${inputLabel}trim=start=0:duration=${duration.toFixed(3)},setpts=${(1 / speed).toFixed(5)}*(PTS-STARTPTS),${startPad}trim=start=0:duration=${endSeconds.toFixed(3)},setpts=PTS-STARTPTS,`;
 }
 
 function finiteOverlayOptions(startSeconds: number, endSeconds: number) {
