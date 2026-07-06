@@ -401,8 +401,12 @@ function commandErrorMessage(error: unknown) {
         : [execaError.stdout, execaError.stderr]
             .filter((value): value is string => typeof value === "string")
             .join("\n");
+    const trimmedOutput =
+      output.length > 20_000
+        ? `${output.slice(0, 4_000)}\n\n...[truncated ${output.length - 20_000} chars]...\n\n${output.slice(-16_000)}`
+        : output;
 
-    return [error.message, output ? `Output:\n${output}` : null]
+    return [error.message, trimmedOutput ? `Output:\n${trimmedOutput}` : null]
       .filter(Boolean)
       .join("\n");
   }
@@ -4165,7 +4169,7 @@ export async function renderJob(jobId: string) {
 
     await runCommand(ffmpegBinary, args, {
       all: true,
-      maxBuffer: 8_000_000,
+      maxBuffer: 128_000_000,
     });
 
     const [outputStat, outputDuration] = await Promise.all([
