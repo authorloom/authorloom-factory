@@ -27,7 +27,7 @@ const outputVideoBufsize = "20M";
 const outputVideoPreset =
   process.env.AUTHORLOOM_FFMPEG_VIDEO_PRESET?.trim() || "veryfast";
 const filterComplexThreadsRaw =
-  process.env.AUTHORLOOM_FFMPEG_FILTER_COMPLEX_THREADS?.trim() ?? "";
+  process.env.AUTHORLOOM_FFMPEG_FILTER_COMPLEX_THREADS?.trim() ?? "1";
 const filterComplexThreadsNumber = Number(filterComplexThreadsRaw);
 const filterComplexThreads =
   filterComplexThreadsRaw &&
