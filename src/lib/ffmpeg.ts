@@ -1423,6 +1423,13 @@ function layoutStudioTimelineClips(template: CanvasLayoutTemplate | null | undef
     : [];
 }
 
+function layoutStudioTimelineHasLayerType(
+  template: CanvasLayoutTemplate | null | undefined,
+  layerType: string,
+) {
+  return layoutStudioTimelineClips(template).some((clip) => clip.layerType === layerType);
+}
+
 function timelineClipEndSeconds(clip: { startSeconds?: number; durationSeconds?: number }) {
   const startSeconds = clampNumber(clip.startSeconds, 0, 3600, 0);
   const durationSeconds = clampNumber(clip.durationSeconds, 0.01, 3600, 0.01);
@@ -3429,8 +3436,11 @@ export async function renderJob(jobId: string) {
   }
 
   const hasThumbnailFile = await fileExists(job.thumbnail_filepath);
+  const studioTimelineOwnsCover = layoutStudioTimelineHasLayerType(studioTemplate, "cover");
   const hasCoverOverlay =
-    (isCoverLayout || Boolean(customCoverBox) || layoutStudioHasElement(studioTemplate, "cover")) &&
+    (isCoverLayout ||
+      Boolean(customCoverBox) ||
+      (layoutStudioHasElement(studioTemplate, "cover") && !studioTimelineOwnsCover)) &&
     hasThumbnailFile;
   const renderDurationSeconds = String(renderDuration);
   const outputFilename = `${job.id}.mp4`;
@@ -3703,6 +3713,18 @@ export async function renderJob(jobId: string) {
 
   const studioBackgroundOverlayInputs: StudioBackgroundOverlayInput[] = [];
   const studioMediaOverlayInputs: StudioMediaOverlayInput[] = [];
+  const studioTimelineGraph: Array<{
+    clipId?: string | null;
+    layerType: string;
+    elementId?: string | null;
+    startSeconds: number;
+    endSeconds: number;
+    assetId?: string | null;
+    assetType?: string | null;
+    filename?: string | null;
+    inputIndex?: number | null;
+    source: "background" | "preparedScreenshot" | "timelineAsset" | "missing";
+  }> = [];
   let resolvedStudioElements: LayoutStudioResolvedElement[] | undefined;
 
   if (studioTemplate) {
@@ -3740,6 +3762,18 @@ export async function renderJob(jobId: string) {
             jobId: job.id,
             filepath,
           });
+          studioTimelineGraph.push({
+            clipId: clip.id,
+            layerType,
+            elementId: clip.elementId,
+            startSeconds,
+            endSeconds,
+            assetId: resolved?.asset?.assetId ?? null,
+            assetType: resolved?.asset?.type ?? null,
+            filename: resolved?.asset?.filename ?? null,
+            inputIndex: 0,
+            source: "background",
+          });
           continue;
         }
 
@@ -3753,6 +3787,18 @@ export async function renderJob(jobId: string) {
           height: canvasHeight,
           startSeconds,
           endSeconds,
+        });
+        studioTimelineGraph.push({
+          clipId: clip.id,
+          layerType,
+          elementId: clip.elementId,
+          startSeconds,
+          endSeconds,
+          assetId: resolved?.asset?.assetId ?? null,
+          assetType: resolved?.asset?.type ?? null,
+          filename: resolved?.asset?.filename ?? null,
+          inputIndex: nextInputIndex,
+          source: "timelineAsset",
         });
         nextInputIndex += 1;
         continue;
@@ -3774,12 +3820,38 @@ export async function renderJob(jobId: string) {
           startSeconds,
           endSeconds,
         });
+        studioTimelineGraph.push({
+          clipId: clip.id,
+          layerType,
+          elementId: clip.elementId ?? element.id ?? null,
+          startSeconds,
+          endSeconds,
+          assetId: resolved?.asset?.assetId ?? job.screenshot_id ?? null,
+          assetType: resolved?.asset?.type ?? "screenshot",
+          filename: resolved?.asset?.filename ?? path.basename(preparedScreenshot.filepath),
+          inputIndex: 1,
+          source: "preparedScreenshot",
+        });
         continue;
       }
 
       const filepath =
         resolved?.asset?.filepath ?? null;
-      if (!filepath || !(await fileExists(filepath))) continue;
+      if (!filepath || !(await fileExists(filepath))) {
+        studioTimelineGraph.push({
+          clipId: clip.id,
+          layerType,
+          elementId: clip.elementId ?? element.id ?? null,
+          startSeconds,
+          endSeconds,
+          assetId: resolved?.asset?.assetId ?? null,
+          assetType: resolved?.asset?.type ?? null,
+          filename: resolved?.asset?.filename ?? null,
+          inputIndex: null,
+          source: "missing",
+        });
+        continue;
+      }
       const dimensions = await getMediaDimensions(filepath).catch(() =>
         ({
           width: canvasWidth,
@@ -3800,8 +3872,41 @@ export async function renderJob(jobId: string) {
         startSeconds,
         endSeconds,
       });
+      studioTimelineGraph.push({
+        clipId: clip.id,
+        layerType,
+        elementId: clip.elementId ?? element.id ?? null,
+        startSeconds,
+        endSeconds,
+        assetId: resolved?.asset?.assetId ?? null,
+        assetType: resolved?.asset?.type ?? null,
+        filename: resolved?.asset?.filename ?? path.basename(filepath),
+        inputIndex: nextInputIndex,
+        source: "timelineAsset",
+      });
       nextInputIndex += 1;
     }
+  }
+
+  if (studioTemplate) {
+    console.log("Resolved Layout Studio render graph", {
+      jobId: job.id,
+      layoutTemplateId: renderOptions.layoutTemplateId ?? renderOptions.layoutTemplate ?? null,
+      renderDurationSeconds: renderDuration,
+      compositionDurationSeconds: layoutStudioCompositionDurationSeconds(studioTemplate),
+      timelineClips: studioTimelineGraph,
+      textOverlays: studioTextOverlayInputs.map((overlay) => ({
+        elementId: overlay.element.id ?? null,
+        elementType: overlay.element.type ?? null,
+        startSeconds: overlay.startSeconds ?? null,
+        endSeconds: overlay.endSeconds ?? null,
+        inputIndex: overlay.inputIndex,
+        width: overlay.width,
+        height: overlay.height,
+      })),
+      topLevelCoverOverlayEnabled: hasCoverOverlay,
+      studioTimelineOwnsCover,
+    });
   }
 
   const sceneVisualOverlayInputs: SceneVisualOverlayInput[] = [];
