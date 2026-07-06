@@ -129,6 +129,7 @@ type RenderOptions = {
     portrait?: CanvasLayoutTemplateAlternate | null;
     landscape?: CanvasLayoutTemplateAlternate | null;
   } | null;
+  renderDiagnostics?: unknown;
   layoutStudioAssets?: {
     introFilepath?: string | null;
     introDurationSeconds?: number | null;
@@ -535,6 +536,54 @@ async function fileExists(filepath: string | null) {
     .access(filepath)
     .then(() => true)
     .catch(() => false);
+}
+
+async function fileDebugInfo(filepath: string | null | undefined) {
+  if (!filepath) {
+    return null;
+  }
+
+  const stat = await fs.stat(filepath).catch(() => null);
+  return {
+    filepath,
+    basename: path.basename(filepath),
+    extension: path.extname(filepath).toLowerCase(),
+    exists: Boolean(stat),
+    sizeBytes: stat?.size ?? null,
+    stillImage: isStillImageFile(filepath),
+  };
+}
+
+function layoutStudioResolvedElementDiagnostics(
+  elements: LayoutStudioResolvedElement[] | undefined,
+) {
+  return (elements ?? []).map((element) => ({
+    id: element.id ?? null,
+    type: element.type ?? null,
+    x: element.x,
+    y: element.y,
+    width: element.width,
+    height: element.height,
+    rule: element.rule ?? null,
+    anchorEnabled: element.anchorEnabled ?? null,
+    anchorTargetId: element.anchorTargetId ?? null,
+    anchorSourcePoint: element.anchorSourcePoint ?? null,
+    anchorTargetPoint: element.anchorTargetPoint ?? null,
+    fit: element.fit ?? null,
+    padding: element.padding ?? null,
+    paddingX: element.paddingX ?? null,
+    paddingY: element.paddingY ?? null,
+  }));
+}
+
+function mediaDimensionsByElementDiagnostics(
+  dimensionsByElementId: LayoutStudioMediaDimensionsByElementId,
+) {
+  return [...dimensionsByElementId.entries()].map(([elementId, dimensions]) => ({
+    elementId,
+    width: dimensions.width,
+    height: dimensions.height,
+  }));
 }
 
 function isHeicFile(filepath: string) {
@@ -3978,7 +4027,133 @@ export async function renderJob(jobId: string) {
     outputFilepath,
   );
 
+  const renderDiagnosticContext = {
+    source: "factory.ffmpeg.renderJob",
+    jobId: job.id,
+    ids: {
+      campaignId: job.campaign_id,
+      screenshotId: job.screenshot_id ?? null,
+      hookId: job.hook_id ?? null,
+      backgroundId: job.background_id ?? null,
+      thumbnailId: job.thumbnail_id ?? null,
+    },
+    upstream: renderOptions.renderDiagnostics ?? null,
+    durations: {
+      rawRequestedRenderDuration,
+      requestedMainRenderDuration,
+      requestedRenderDuration,
+      renderDuration,
+      renderDurationSeconds,
+      requiredBackgroundInputDuration,
+      backgroundDuration,
+      audioDuration,
+      audioLimitedRenderDuration,
+      studioMainStartSeconds,
+      studioMainDuration,
+      studioOutroDuration,
+    },
+    files: {
+      backgroundOriginal: await fileDebugInfo(job.background_filepath),
+      preparedBackground: await fileDebugInfo(preparedBackground.filepath),
+      screenshotOriginal: await fileDebugInfo(job.screenshot_filepath),
+      preparedScreenshot: await fileDebugInfo(preparedScreenshot.filepath),
+      thumbnail: await fileDebugInfo(job.thumbnail_filepath),
+      audio: await fileDebugInfo(job.audio_filepath),
+      output: {
+        filepath: outputFilepath,
+        basename: path.basename(outputFilepath),
+      },
+    },
+    mediaMeasurements: {
+      screenshotDimensions,
+      backgroundColorMetadata,
+      backgroundColorMetadataForRender,
+      layoutStudioMediaDimensionsByElementId:
+        mediaDimensionsByElementDiagnostics(studioMediaDimensionsByElementId),
+    },
+    layoutStudio: studioTemplate
+      ? {
+          layoutTemplate: renderOptions.layoutTemplate ?? null,
+          layoutTemplateId: renderOptions.layoutTemplateId ?? null,
+          compositionDurationSeconds: layoutStudioCompositionDurationSeconds(studioTemplate),
+          timelineGraph: null,
+          resolvedElements: layoutStudioResolvedElementDiagnostics(resolvedStudioElements),
+          textOverlayInputs: studioTextOverlayInputs.map((overlay) => ({
+            elementId: overlay.element.id ?? null,
+            elementType: overlay.element.type ?? null,
+            inputIndex: overlay.inputIndex,
+            x: overlay.element.x,
+            y: overlay.element.y,
+            elementWidth: overlay.element.width,
+            elementHeight: overlay.element.height,
+            overlayWidth: overlay.width,
+            overlayHeight: overlay.height,
+            startSeconds: overlay.startSeconds ?? null,
+            endSeconds: overlay.endSeconds ?? null,
+            rule: overlay.element.rule ?? null,
+            anchorEnabled: overlay.element.anchorEnabled ?? null,
+            anchorTargetId: overlay.element.anchorTargetId ?? null,
+          })),
+          mediaOverlayInputs: studioMediaOverlayInputs.map((overlay) => ({
+            elementId: overlay.element.id ?? null,
+            elementType: overlay.element.type ?? null,
+            inputIndex: overlay.inputIndex,
+            x: overlay.element.x,
+            y: overlay.element.y,
+            elementWidth: overlay.element.width,
+            elementHeight: overlay.element.height,
+            mediaWidth: overlay.width,
+            mediaHeight: overlay.height,
+            startSeconds: overlay.startSeconds,
+            endSeconds: overlay.endSeconds,
+          })),
+          backgroundOverlayInputs: studioBackgroundOverlayInputs,
+          topLevelCoverOverlayEnabled: hasCoverOverlay,
+          studioTimelineOwnsCover: null,
+        }
+      : null,
+    legacyOverlays: {
+      hookOverlay: hookOverlay
+        ? {
+            filepath: hookOverlay.filepath,
+            width: hookOverlay.width,
+            height: hookOverlay.height,
+          }
+        : null,
+      timedHookOverlayInputs,
+      metadataOverlay: postCopyOverlays.metadataOverlay
+        ? {
+            filepath: postCopyOverlays.metadataOverlay.filepath,
+            width: postCopyOverlays.metadataOverlay.width,
+            height: postCopyOverlays.metadataOverlay.height,
+            inputIndex: metadataOverlayInputIndex,
+          }
+        : null,
+      keywordsOverlay: postCopyOverlays.keywordsOverlay
+        ? {
+            filepath: postCopyOverlays.keywordsOverlay.filepath,
+            width: postCopyOverlays.keywordsOverlay.width,
+            height: postCopyOverlays.keywordsOverlay.height,
+            inputIndex: keywordsOverlayInputIndex,
+          }
+        : null,
+      coverInputIndex,
+      sceneVisualOverlayCount: sceneVisualOverlayInputs.length,
+    },
+    ffmpeg: {
+      inputCount: nextInputIndex,
+      filterLength: filterComplex.length,
+      outputFps,
+      outputFrames: Math.ceil(renderDuration * outputFps),
+      preset: outputVideoPreset,
+      filterComplexThreads: filterComplexThreads ?? "auto",
+      timeoutMs: ffmpegTimeoutMs,
+    },
+  };
+
   try {
+    console.log("Authorloom factory render diagnostics", renderDiagnosticContext);
+
     console.log("Render job summary:", {
       jobId: job.id,
       background: job.background_filepath,
@@ -4037,6 +4212,11 @@ export async function renderJob(jobId: string) {
     };
   } catch (error) {
     const message = commandErrorMessage(error);
+    console.error("Authorloom factory render failure diagnostics", {
+      jobId: job.id,
+      message,
+      renderDiagnosticContext,
+    });
     markRenderJobFailed(job.id, message);
     throw new Error(message);
   } finally {
