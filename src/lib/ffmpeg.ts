@@ -1011,7 +1011,7 @@ function buildImageTextFilterComplex({
     const afterLabel = `studio_bg_after_${index}`;
     baseFilters.push(
       `[${overlay.inputIndex}:v]setpts=${(1 / playbackSpeed).toFixed(5)}*PTS,${backgroundScaleFilter},crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY},setsar=1,format=yuv420p[${label}]`,
-      `[${backgroundLabel}][${label}]overlay=x=0:y=0:enable='between(t,${overlay.startSeconds},${overlay.endSeconds})':eof_action=pass[${afterLabel}]`,
+      `[${backgroundLabel}][${label}]overlay=x=0:y=0:enable='between(t,${overlay.startSeconds},${overlay.endSeconds})':eof_action=pass:shortest=1[${afterLabel}]`,
     );
     backgroundLabel = afterLabel;
   });
@@ -1244,7 +1244,7 @@ function buildLayoutStudioFilterComplex({
           const enable = ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds);
           filters.push(
             ...media.filters(`[${overlay.inputIndex}:v]`, `studio_shot_${mediaIndex}`),
-            `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${enable}:eof_action=pass[studio_after_${mediaIndex}]`,
+            `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${enable}:eof_action=pass:shortest=1[studio_after_${mediaIndex}]`,
           );
           currentLabel = `studio_after_${mediaIndex}`;
           mediaIndex += 1;
@@ -1259,7 +1259,7 @@ function buildLayoutStudioFilterComplex({
         );
         filters.push(
           ...media.filters(`[${coverOverlay.inputIndex}:v]`, `studio_cover_${mediaIndex}`),
-          `[${currentLabel}][studio_cover_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${mainEnable}:eof_action=pass[studio_after_${mediaIndex}]`,
+          `[${currentLabel}][studio_cover_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${mainEnable}:eof_action=pass:shortest=1[studio_after_${mediaIndex}]`,
         );
         currentLabel = `studio_after_${mediaIndex}`;
         mediaIndex += 1;
@@ -1270,7 +1270,7 @@ function buildLayoutStudioFilterComplex({
       const media = fitMediaIntoStudioElement(element, screenshotDimensions);
       filters.push(
         ...media.filters("[1:v]", `studio_shot_${mediaIndex}`),
-        `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${mainEnable}:eof_action=pass[studio_after_${mediaIndex}]`,
+        `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${mainEnable}:eof_action=pass:shortest=1[studio_after_${mediaIndex}]`,
       );
       currentLabel = `studio_after_${mediaIndex}`;
       mediaIndex += 1;
@@ -1293,7 +1293,7 @@ function buildLayoutStudioFilterComplex({
             `studio_text_${textIndex}`,
             element,
           ),
-          `[${currentLabel}][studio_text_${textIndex}]overlay=x=${studioCenteredOverlayX(element)}:y=${studioCenteredOverlayY(element)}${enable}:eof_action=pass[studio_text_after_${textIndex}]`,
+          `[${currentLabel}][studio_text_${textIndex}]overlay=x=${studioCenteredOverlayX(element)}:y=${studioCenteredOverlayY(element)}${enable}:eof_action=pass:shortest=1[studio_text_after_${textIndex}]`,
         );
         currentLabel = `studio_text_after_${textIndex}`;
         textIndex += 1;
@@ -1310,7 +1310,7 @@ function buildLayoutStudioFilterComplex({
     const afterLabel = `studio_${key}_after`;
     filters.push(
       `[${overlay.inputIndex}:v]scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight}:(iw-ow)/2:(ih-oh)/2,setsar=1,format=rgba[${label}]`,
-      `[${currentLabel}][${label}]overlay=x=0:y=0${ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds)}[${afterLabel}]`,
+      `[${currentLabel}][${label}]overlay=x=0:y=0${ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds)}:eof_action=pass:shortest=1[${afterLabel}]`,
     );
     currentLabel = afterLabel;
   }
