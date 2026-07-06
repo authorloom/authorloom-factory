@@ -701,9 +701,9 @@ function finiteTimelineInputPrefix(
   const start = clampNumber(startSeconds, 0, 3600, 0);
   const duration = Math.max(0.01, endSeconds - start);
   const speed = clampNumber(playbackSpeed, 0.1, 10, 1);
-  const startPad = start > 0.001 ? `tpad=start_duration=${start.toFixed(3)}:start_mode=clone,` : "";
+  const timestampOffset = start > 0.001 ? `+${start.toFixed(3)}/TB` : "";
 
-  return `${inputLabel}trim=start=0:duration=${duration.toFixed(3)},setpts=${(1 / speed).toFixed(5)}*(PTS-STARTPTS),${startPad}`;
+  return `${inputLabel}trim=start=0:duration=${duration.toFixed(3)},setpts=${(1 / speed).toFixed(5)}*(PTS-STARTPTS)${timestampOffset},`;
 }
 
 function finiteOverlayOptions(startSeconds: number, endSeconds: number) {
@@ -3231,7 +3231,7 @@ async function renderSlideImage(input: {
   const elementByKey = new Map(
     resolvedElements.map((element) => [studioElementKey(element), element]),
   );
-  const args = ["-y", "-hide_banner", "-loglevel", "error"];
+  const args = ["-y", "-nostdin", "-hide_banner", "-nostats", "-loglevel", "fatal"];
   const sceneBackgroundFilepath =
     sceneAssetFilepath(input.scene.assets?.background) || input.backgroundFilepath;
 
@@ -3980,7 +3980,7 @@ export async function renderJob(jobId: string) {
         })
     : null;
 
-  const args = ["-y", "-hide_banner", "-loglevel", "error"];
+  const args = ["-y", "-nostdin", "-hide_banner", "-nostats", "-loglevel", "fatal"];
 
   if (
     !preparedBackground.temporary &&
