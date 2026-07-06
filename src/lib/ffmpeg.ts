@@ -571,6 +571,23 @@ function pushFilterComplexInput(args: string[], filterComplex: string) {
   args.push("-filter_complex", filterComplex);
 }
 
+function finiteTimelineInputPrefix(
+  inputLabel: string,
+  startSeconds: number,
+  endSeconds: number,
+  playbackSpeed = 1,
+) {
+  const start = clampNumber(startSeconds, 0, 3600, 0);
+  const duration = Math.max(0.01, endSeconds - start);
+  const speed = clampNumber(playbackSpeed, 0.1, 10, 1);
+
+  return `${inputLabel}trim=start=0:duration=${duration.toFixed(3)},setpts=${(1 / speed).toFixed(5)}*(PTS-STARTPTS)+${start.toFixed(3)}/TB,`;
+}
+
+function finiteOverlayOptions(startSeconds: number, endSeconds: number) {
+  return `${ffmpegEnableWindow(startSeconds, endSeconds)}:eof_action=pass:repeatlast=0`;
+}
+
 async function prepareBackgroundVideoForRender({
   campaignId,
   cropVariant,
@@ -1010,8 +1027,8 @@ function buildImageTextFilterComplex({
     const label = `studio_bg_${index}`;
     const afterLabel = `studio_bg_after_${index}`;
     baseFilters.push(
-      `[${overlay.inputIndex}:v]setpts=${(1 / playbackSpeed).toFixed(5)}*PTS,${backgroundScaleFilter},crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY},setsar=1,format=yuv420p[${label}]`,
-      `[${backgroundLabel}][${label}]overlay=x=0:y=0:enable='between(t,${overlay.startSeconds},${overlay.endSeconds})':eof_action=pass:shortest=1[${afterLabel}]`,
+      `${finiteTimelineInputPrefix(`[${overlay.inputIndex}:v]`, overlay.startSeconds, overlay.endSeconds, playbackSpeed)}${backgroundScaleFilter},crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY},setsar=1,format=yuv420p[${label}]`,
+      `[${backgroundLabel}][${label}]overlay=x=0:y=0${finiteOverlayOptions(overlay.startSeconds, overlay.endSeconds)}[${afterLabel}]`,
     );
     backgroundLabel = afterLabel;
   });
@@ -1241,10 +1258,16 @@ function buildLayoutStudioFilterComplex({
             width: overlay.width,
             height: overlay.height,
           });
-          const enable = ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds);
           filters.push(
-            ...media.filters(`[${overlay.inputIndex}:v]`, `studio_shot_${mediaIndex}`),
-            `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${enable}:eof_action=pass:shortest=1[studio_after_${mediaIndex}]`,
+            ...media.filters(
+              finiteTimelineInputPrefix(
+                `[${overlay.inputIndex}:v]`,
+                overlay.startSeconds,
+                overlay.endSeconds,
+              ),
+              `studio_shot_${mediaIndex}`,
+            ),
+            `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${finiteOverlayOptions(overlay.startSeconds, overlay.endSeconds)}[studio_after_${mediaIndex}]`,
           );
           currentLabel = `studio_after_${mediaIndex}`;
           mediaIndex += 1;
@@ -1258,8 +1281,17 @@ function buildLayoutStudioFilterComplex({
           { width: coverOverlay.width, height: coverOverlay.height },
         );
         filters.push(
-          ...media.filters(`[${coverOverlay.inputIndex}:v]`, `studio_cover_${mediaIndex}`),
-          `[${currentLabel}][studio_cover_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${mainEnable}:eof_action=pass:shortest=1[studio_after_${mediaIndex}]`,
+          ...media.filters(
+            studioTimeline
+              ? finiteTimelineInputPrefix(
+                  `[${coverOverlay.inputIndex}:v]`,
+                  studioTimeline.mainStartSeconds,
+                  studioTimeline.mainEndSeconds,
+                )
+              : `[${coverOverlay.inputIndex}:v]`,
+            `studio_cover_${mediaIndex}`,
+          ),
+          `[${currentLabel}][studio_cover_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${mainEnable}:eof_action=pass:repeatlast=0[studio_after_${mediaIndex}]`,
         );
         currentLabel = `studio_after_${mediaIndex}`;
         mediaIndex += 1;
@@ -1269,8 +1301,17 @@ function buildLayoutStudioFilterComplex({
 
       const media = fitMediaIntoStudioElement(element, screenshotDimensions);
       filters.push(
-        ...media.filters("[1:v]", `studio_shot_${mediaIndex}`),
-        `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${mainEnable}:eof_action=pass:shortest=1[studio_after_${mediaIndex}]`,
+        ...media.filters(
+          studioTimeline
+            ? finiteTimelineInputPrefix(
+                "[1:v]",
+                studioTimeline.mainStartSeconds,
+                studioTimeline.mainEndSeconds,
+              )
+            : "[1:v]",
+          `studio_shot_${mediaIndex}`,
+        ),
+        `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${mainEnable}:eof_action=pass:repeatlast=0[studio_after_${mediaIndex}]`,
       );
       currentLabel = `studio_after_${mediaIndex}`;
       mediaIndex += 1;
@@ -1287,13 +1328,21 @@ function buildLayoutStudioFilterComplex({
           typeof overlay.startSeconds === "number" && typeof overlay.endSeconds === "number"
             ? ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds)
             : mainEnable;
+        const inputPrefix =
+          typeof overlay.startSeconds === "number" && typeof overlay.endSeconds === "number"
+            ? finiteTimelineInputPrefix(
+                `[${overlay.inputIndex}:v]`,
+                overlay.startSeconds,
+                overlay.endSeconds,
+              )
+            : `[${overlay.inputIndex}:v]`;
         filters.push(
           ...studioOverlayInputFilters(
-            `[${overlay.inputIndex}:v]`,
+            inputPrefix,
             `studio_text_${textIndex}`,
             element,
           ),
-          `[${currentLabel}][studio_text_${textIndex}]overlay=x=${studioCenteredOverlayX(element)}:y=${studioCenteredOverlayY(element)}${enable}:eof_action=pass:shortest=1[studio_text_after_${textIndex}]`,
+          `[${currentLabel}][studio_text_${textIndex}]overlay=x=${studioCenteredOverlayX(element)}:y=${studioCenteredOverlayY(element)}${enable}:eof_action=pass:repeatlast=0[studio_text_after_${textIndex}]`,
         );
         currentLabel = `studio_text_after_${textIndex}`;
         textIndex += 1;
@@ -1309,8 +1358,8 @@ function buildLayoutStudioFilterComplex({
     const label = `studio_${key}_timeline`;
     const afterLabel = `studio_${key}_after`;
     filters.push(
-      `[${overlay.inputIndex}:v]scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight}:(iw-ow)/2:(ih-oh)/2,setsar=1,format=rgba[${label}]`,
-      `[${currentLabel}][${label}]overlay=x=0:y=0${ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds)}:eof_action=pass:shortest=1[${afterLabel}]`,
+      `${finiteTimelineInputPrefix(`[${overlay.inputIndex}:v]`, overlay.startSeconds, overlay.endSeconds)}scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight}:(iw-ow)/2:(ih-oh)/2,setsar=1,format=rgba[${label}]`,
+      `[${currentLabel}][${label}]overlay=x=0:y=0${finiteOverlayOptions(overlay.startSeconds, overlay.endSeconds)}[${afterLabel}]`,
     );
     currentLabel = afterLabel;
   }
@@ -4113,7 +4162,10 @@ export async function renderJob(jobId: string) {
       filterComplexThreads: filterComplexThreads ?? "auto",
     });
 
-    await runCommand(ffmpegBinary, args, { ignoreOutput: true });
+    await runCommand(ffmpegBinary, args, {
+      all: true,
+      maxBuffer: 8_000_000,
+    });
 
     const [outputStat, outputDuration] = await Promise.all([
       fs.stat(outputFilepath),
