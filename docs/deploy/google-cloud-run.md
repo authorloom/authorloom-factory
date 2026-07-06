@@ -40,6 +40,16 @@ Create these secrets in Secret Manager:
 - `GOOGLE_OAUTH_CLIENT_SECRET`
 - `GOOGLE_OAUTH_TOKEN_JSON`
 
+Set these non-secret environment variables on the Cloud Run service:
+
+- `AUTHORLOOM_PREVIEW_BUCKET=authorloom-previews`
+- `AUTHORLOOM_PREVIEW_OBJECT_PREFIX=prod-rendered-videos` for production, or
+  `dev-rendered-videos` for development
+
+Do not remove or rename these storage variables during a deploy. The factory can
+render videos without them, but it cannot stage completed outputs back to GCS,
+so jobs will be reported as failed after FFmpeg succeeds.
+
 For the current beta path, Google Drive writes should use Workspace
 impersonation. The service account must have domain-wide delegation enabled and
 must be authorized in Google Workspace Admin for these scopes:
@@ -110,7 +120,7 @@ gcloud run deploy "$SERVICE" \
   --memory 4Gi \
   --timeout 3600 \
   --no-cpu-throttling \
-  --set-env-vars NODE_ENV=production,GOOGLE_FACTORY_IMPERSONATE_WORKSPACE=true,GOOGLE_WORKSPACE_IMPERSONATE_EMAIL=admin@authorloom.com,GOOGLE_FACTORY_PREFER_OAUTH_WRITES=false,AUTHORLOOM_WORKER_POLL_MS=5000 \
+  --set-env-vars NODE_ENV=production,GOOGLE_FACTORY_IMPERSONATE_WORKSPACE=true,GOOGLE_WORKSPACE_IMPERSONATE_EMAIL=admin@authorloom.com,GOOGLE_FACTORY_PREFER_OAUTH_WRITES=false,AUTHORLOOM_WORKER_POLL_MS=5000,AUTHORLOOM_PREVIEW_BUCKET=authorloom-previews,AUTHORLOOM_PREVIEW_OBJECT_PREFIX=prod-rendered-videos \
   --set-secrets AUTHORLOOM_CONVEX_URL=AUTHORLOOM_CONVEX_URL:latest,AUTHORLOOM_WORKER_SECRET=AUTHORLOOM_WORKER_SECRET:latest,GOOGLE_CLIENT_EMAIL=GOOGLE_CLIENT_EMAIL:latest,GOOGLE_PRIVATE_KEY=GOOGLE_PRIVATE_KEY:latest,GOOGLE_PROJECT_ID=GOOGLE_PROJECT_ID:latest,GOOGLE_OAUTH_CLIENT_ID=GOOGLE_OAUTH_CLIENT_ID:latest,GOOGLE_OAUTH_CLIENT_SECRET=GOOGLE_OAUTH_CLIENT_SECRET:latest,GOOGLE_OAUTH_TOKEN_JSON=GOOGLE_OAUTH_TOKEN_JSON:latest
 ```
 

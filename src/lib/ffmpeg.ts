@@ -1227,7 +1227,7 @@ function buildLayoutStudioFilterComplex({
   let mediaIndex = 0;
   let textIndex = 0;
   const mainEnable = studioTimeline
-    ? `:enable='between(t,${studioTimeline.mainStartSeconds},${studioTimeline.mainEndSeconds})'`
+    ? ffmpegEnableWindow(studioTimeline.mainStartSeconds, studioTimeline.mainEndSeconds)
     : "";
 
   for (const element of elements) {
@@ -1241,7 +1241,7 @@ function buildLayoutStudioFilterComplex({
             width: overlay.width,
             height: overlay.height,
           });
-          const enable = `:enable='between(t,${overlay.startSeconds},${overlay.endSeconds})'`;
+          const enable = ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds);
           filters.push(
             ...media.filters(`[${overlay.inputIndex}:v]`, `studio_shot_${mediaIndex}`),
             `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${enable}:eof_action=pass[studio_after_${mediaIndex}]`,
@@ -1285,7 +1285,7 @@ function buildLayoutStudioFilterComplex({
       for (const overlay of overlays) {
         const enable =
           typeof overlay.startSeconds === "number" && typeof overlay.endSeconds === "number"
-            ? `:enable='between(t,${overlay.startSeconds},${overlay.endSeconds})'`
+            ? ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds)
             : mainEnable;
         filters.push(
           ...studioOverlayInputFilters(
@@ -1310,7 +1310,7 @@ function buildLayoutStudioFilterComplex({
     const afterLabel = `studio_${key}_after`;
     filters.push(
       `[${overlay.inputIndex}:v]scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight}:(iw-ow)/2:(ih-oh)/2,setsar=1,format=rgba[${label}]`,
-      `[${currentLabel}][${label}]overlay=x=0:y=0:enable='between(t,${overlay.startSeconds},${overlay.endSeconds})'[${afterLabel}]`,
+      `[${currentLabel}][${label}]overlay=x=0:y=0${ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds)}[${afterLabel}]`,
     );
     currentLabel = afterLabel;
   }
@@ -1384,6 +1384,10 @@ function rotatedElementPadding(element: LayoutStudioResolvedElement) {
 
 function studioElementKey(element: Pick<LayoutStudioElement, "id" | "type" | "x" | "y">) {
   return element.id ?? `${element.type ?? "element"}:${element.x ?? 0}:${element.y ?? 0}`;
+}
+
+function ffmpegEnableWindow(startSeconds: number, endSeconds: number) {
+  return `:enable='gte(t,${startSeconds})*lt(t,${endSeconds})'`;
 }
 
 function isLayoutStudioTemplate(template: CanvasLayoutTemplate | null | undefined) {
@@ -3756,28 +3760,31 @@ export async function renderJob(jobId: string) {
 
       if (!["screenshot", "image", "cover"].includes(layerType)) continue;
 
-      // The Studio screenshot element is already rendered from the prepared
-      // screenshot input in buildLayoutStudioFilterComplex. Feeding timeline
-      // screenshot clips as additional looped image inputs makes the final
-      // overlay graph much heavier and can leave ffmpeg stuck in framesync.
-      if (layerType === "screenshot") continue;
-
       const element =
         (clip.elementId ? elementById.get(clip.elementId) : null) ??
         (fallbackElementsByType.get(layerType) ?? [])[0];
       if (!element) continue;
+
+      if (layerType === "screenshot") {
+        studioMediaOverlayInputs.push({
+          element,
+          inputIndex: 1,
+          width: screenshotDimensions.width,
+          height: screenshotDimensions.height,
+          startSeconds,
+          endSeconds,
+        });
+        continue;
+      }
+
       const filepath =
-        layerType === "screenshot"
-          ? resolved?.asset?.filepath ?? preparedScreenshot.filepath
-          : resolved?.asset?.filepath ?? null;
+        resolved?.asset?.filepath ?? null;
       if (!filepath || !(await fileExists(filepath))) continue;
       const dimensions = await getMediaDimensions(filepath).catch(() =>
-        layerType === "screenshot"
-          ? screenshotDimensions
-          : {
-              width: canvasWidth,
-              height: canvasHeight,
-            },
+        ({
+          width: canvasWidth,
+          height: canvasHeight,
+        }),
       );
 
       pushMediaInput(args, filepath, {
@@ -3906,7 +3913,7 @@ export async function renderJob(jobId: string) {
 
   const filterComplex = [
     mainFilterComplex,
-    `[${composedOutputLabel}]scale=${canvasWidth}:${canvasHeight}:flags=lanczos:in_range=${outputColorRange}:out_range=${outputColorRange}:out_color_matrix=${outputColorSpace},setsar=1,format=yuv420p[vout]`,
+    `[${composedOutputLabel}]trim=start=0:duration=${renderDurationSeconds},setpts=PTS-STARTPTS,fps=${outputFps},scale=${canvasWidth}:${canvasHeight}:flags=lanczos:in_range=${outputColorRange}:out_range=${outputColorRange}:out_color_matrix=${outputColorSpace},setsar=1,format=yuv420p[vout]`,
   ].join(";");
 
   pushFilterComplexInput(args, filterComplex);
