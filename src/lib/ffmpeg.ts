@@ -590,6 +590,62 @@ function isHeicFile(filepath: string) {
   return [".heic", ".heif"].includes(path.extname(filepath).toLowerCase());
 }
 
+async function detectRasterImageKind(filepath: string) {
+  try {
+    const handle = await fs.open(filepath, "r");
+    try {
+      const buffer = Buffer.alloc(32);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      const signature = buffer.subarray(0, bytesRead);
+
+      if (
+        signature.length >= 3 &&
+        signature[0] === 0xff &&
+        signature[1] === 0xd8 &&
+        signature[2] === 0xff
+      ) {
+        return "jpeg";
+      }
+      if (
+        signature.length >= 8 &&
+        signature[0] === 0x89 &&
+        signature[1] === 0x50 &&
+        signature[2] === 0x4e &&
+        signature[3] === 0x47 &&
+        signature[4] === 0x0d &&
+        signature[5] === 0x0a &&
+        signature[6] === 0x1a &&
+        signature[7] === 0x0a
+      ) {
+        return "png";
+      }
+      if (signature.subarray(0, 4).toString("ascii") === "GIF8") {
+        return "gif";
+      }
+      if (
+        signature.length >= 12 &&
+        signature.subarray(0, 4).toString("ascii") === "RIFF" &&
+        signature.subarray(8, 12).toString("ascii") === "WEBP"
+      ) {
+        return "webp";
+      }
+      if (signature.length >= 12 && signature.subarray(4, 8).toString("ascii") === "ftyp") {
+        const brand = signature.subarray(8, 12).toString("ascii").toLowerCase();
+        if (brand.includes("avif")) return "avif";
+        if (brand.includes("heic") || brand.includes("heif") || brand.includes("mif1")) {
+          return "heic";
+        }
+      }
+
+      return null;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
 function isStillImageFile(filepath: string) {
   return [".avif", ".gif", ".jpeg", ".jpg", ".png", ".webp"].includes(
     path.extname(filepath).toLowerCase(),
@@ -743,7 +799,25 @@ async function prepareScreenshotForRender({
   jobId: string;
   screenshotFilepath: string;
 }) {
+  const imageKind = await detectRasterImageKind(screenshotFilepath);
+
   if (!isHeicFile(screenshotFilepath)) {
+    if (imageKind === "jpeg") {
+      return {
+        filepath: screenshotFilepath,
+        temporary: false,
+      };
+    }
+
+    if (imageKind && ["png", "gif", "webp", "avif"].includes(imageKind)) {
+      return prepareNonJpegScreenshotForRender({
+        campaignId,
+        imageKind,
+        jobId,
+        screenshotFilepath,
+      });
+    }
+
     return {
       filepath: screenshotFilepath,
       temporary: false,
@@ -779,10 +853,12 @@ async function prepareScreenshotForRender({
     try {
       await runCommand(converter.file, converter.args, { all: true });
       await getMediaDimensions(outputFilepath);
-      return {
-        filepath: outputFilepath,
-        temporary: true,
-      };
+      return prepareNonJpegScreenshotForRender({
+        campaignId,
+        imageKind: "heic",
+        jobId,
+        screenshotFilepath: outputFilepath,
+      });
     } catch (error) {
       errors.push(`${converter.file}: ${commandErrorMessage(error)}`);
     }
@@ -791,6 +867,55 @@ async function prepareScreenshotForRender({
   throw new Error(
     `Could not convert HEIC screenshot for render.\n${errors.join("\n\n")}`,
   );
+}
+
+async function prepareNonJpegScreenshotForRender({
+  campaignId,
+  imageKind,
+  jobId,
+  screenshotFilepath,
+}: {
+  campaignId: string;
+  imageKind: string;
+  jobId: string;
+  screenshotFilepath: string;
+}) {
+  const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
+  const outputFilepath = path.join(tempDirectory, `${jobId}-screenshot-normalized.jpg`);
+
+  await fs.mkdir(tempDirectory, { recursive: true });
+
+  await runCommand(
+    ffmpegBinary,
+    [
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      screenshotFilepath,
+      "-frames:v",
+      "1",
+      "-vf",
+      "format=rgb24",
+      "-q:v",
+      "2",
+      outputFilepath,
+    ],
+    { all: true },
+  );
+  await getMediaDimensions(outputFilepath);
+  console.log("Normalized screenshot still image for render", {
+    jobId,
+    imageKind,
+    source: screenshotFilepath,
+    output: outputFilepath,
+  });
+
+  return {
+    filepath: outputFilepath,
+    temporary: true,
+  };
 }
 
 function calculateLayout({
