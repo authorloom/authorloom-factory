@@ -365,6 +365,13 @@ type StudioBackgroundOverlayInput = OverlayInput & {
   endSeconds: number;
 };
 
+type StudioElementTimelineWindow = {
+  startSeconds: number;
+  endSeconds: number;
+};
+
+type StudioElementTimelineWindowsByElementId = Map<string, StudioElementTimelineWindow[]>;
+
 function sameRenderFilepath(left: string | null | undefined, right: string | null | undefined) {
   if (!left || !right) return false;
   return path.resolve(left) === path.resolve(right);
@@ -969,6 +976,7 @@ function buildImageTextFilterComplex({
   studioTextOverlays = [],
   mediaDimensionsByElementId,
   resolvedLayoutStudioElements,
+  studioElementTimelineWindows,
   studioTimeline,
   outputLabel = "vout",
 }: {
@@ -987,6 +995,7 @@ function buildImageTextFilterComplex({
   studioTextOverlays?: StudioTextOverlayInput[];
   mediaDimensionsByElementId?: LayoutStudioMediaDimensionsByElementId;
   resolvedLayoutStudioElements?: LayoutStudioResolvedElement[];
+  studioElementTimelineWindows?: StudioElementTimelineWindowsByElementId;
   studioTimeline?: {
     mainStartSeconds: number;
     mainEndSeconds: number;
@@ -1206,6 +1215,7 @@ function buildImageTextFilterComplex({
       studioTextOverlays,
       mediaDimensionsByElementId,
       resolvedElements: resolvedLayoutStudioElements,
+      studioElementTimelineWindows,
     });
   }
 
@@ -1361,6 +1371,7 @@ function buildLayoutStudioFilterComplex({
   studioTextOverlays,
   mediaDimensionsByElementId,
   resolvedElements,
+  studioElementTimelineWindows,
 }: {
   baseFilters: string[];
   coverOverlay?: CoverOverlayInput | null;
@@ -1377,6 +1388,7 @@ function buildLayoutStudioFilterComplex({
   studioTextOverlays: StudioTextOverlayInput[];
   mediaDimensionsByElementId?: LayoutStudioMediaDimensionsByElementId;
   resolvedElements?: LayoutStudioResolvedElement[];
+  studioElementTimelineWindows?: StudioElementTimelineWindowsByElementId;
 }) {
   const elements =
     resolvedElements ??
@@ -1404,6 +1416,8 @@ function buildLayoutStudioFilterComplex({
   const mainEnable = studioTimeline
     ? ffmpegEnableWindow(studioTimeline.mainStartSeconds, studioTimeline.mainEndSeconds)
     : "";
+  const elementEnable = (element: LayoutStudioResolvedElement) =>
+    ffmpegEnableWindows(studioElementTimelineWindows?.get(studioElementKey(element)), mainEnable);
 
   for (const element of elements) {
     const elementType = element.type;
@@ -1432,9 +1446,10 @@ function buildLayoutStudioFilterComplex({
           element,
           { width: coverOverlay.width, height: coverOverlay.height },
         );
+        const enable = elementEnable(element);
         filters.push(
           ...media.filters(`[${coverOverlay.inputIndex}:v]`, `studio_cover_${mediaIndex}`),
-          `[${currentLabel}][studio_cover_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${mainEnable}:eof_action=pass[studio_after_${mediaIndex}]`,
+          `[${currentLabel}][studio_cover_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${enable}:eof_action=pass[studio_after_${mediaIndex}]`,
         );
         currentLabel = `studio_after_${mediaIndex}`;
         mediaIndex += 1;
@@ -1449,9 +1464,10 @@ function buildLayoutStudioFilterComplex({
       }
 
       const media = fitMediaIntoStudioElement(element, screenshotDimensions);
+      const enable = elementEnable(element);
       filters.push(
         ...media.filters("[1:v]", `studio_shot_${mediaIndex}`),
-        `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${mainEnable}:eof_action=pass[studio_after_${mediaIndex}]`,
+        `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${enable}:eof_action=pass[studio_after_${mediaIndex}]`,
       );
       currentLabel = `studio_after_${mediaIndex}`;
       mediaIndex += 1;
@@ -1578,6 +1594,26 @@ function ffmpegEnableWindow(startSeconds: number, endSeconds: number) {
   return `:enable='gte(t,${startSeconds})*lt(t,${endSeconds})'`;
 }
 
+function ffmpegEnableWindows(windows: StudioElementTimelineWindow[] | undefined, fallback: string) {
+  const validWindows = (windows ?? []).filter(
+    (window) =>
+      Number.isFinite(window.startSeconds) &&
+      Number.isFinite(window.endSeconds) &&
+      window.endSeconds > window.startSeconds,
+  );
+
+  if (validWindows.length === 0) return fallback;
+  if (validWindows.length === 1) {
+    return ffmpegEnableWindow(validWindows[0].startSeconds, validWindows[0].endSeconds);
+  }
+
+  const expression = validWindows
+    .map((window) => `gte(t,${window.startSeconds})*lt(t,${window.endSeconds})`)
+    .join("+");
+
+  return `:enable='${expression}'`;
+}
+
 function isLayoutStudioTemplate(template: CanvasLayoutTemplate | null | undefined) {
   const hasTopLevelElements = Array.isArray(template?.elements) && template.elements.length > 0;
   const hasSceneElements = Array.isArray(template?.scenes) &&
@@ -1638,6 +1674,45 @@ export function layoutStudioCompositionDurationSeconds(
   );
 
   return duration > 0 ? duration : null;
+}
+
+export function layoutStudioElementTimelineWindows(
+  template: CanvasLayoutTemplate | null | undefined,
+  resolvedElements?: LayoutStudioResolvedElement[],
+) {
+  const elements = resolvedElements ?? (template ? layoutStudioElements(template) : []);
+  const elementById = new Map(
+    elements
+      .filter((element) => element.id)
+      .map((element) => [element.id as string, element]),
+  );
+  const fallbackElementsByType = new Map<string, Array<Pick<LayoutStudioElement, "id" | "type" | "x" | "y">>>();
+  for (const element of elements) {
+    const type = element.type ?? "";
+    if (!["screenshot", "image", "cover"].includes(type)) continue;
+    fallbackElementsByType.set(type, [...(fallbackElementsByType.get(type) ?? []), element]);
+  }
+
+  const windows: StudioElementTimelineWindowsByElementId = new Map();
+
+  for (const clip of layoutStudioTimelineClips(template)) {
+    const layerType = clip.layerType ?? "";
+    if (!["screenshot", "image", "cover"].includes(layerType)) continue;
+
+    const element =
+      (clip.elementId ? elementById.get(clip.elementId) : null) ??
+      (fallbackElementsByType.get(layerType) ?? [])[0];
+    if (!element) continue;
+
+    const startSeconds = clampNumber(clip.startSeconds, 0, 3600, 0);
+    const endSeconds = timelineClipEndSeconds(clip);
+    if (endSeconds <= startSeconds) continue;
+
+    const key = studioElementKey(element);
+    windows.set(key, [...(windows.get(key) ?? []), { startSeconds, endSeconds }]);
+  }
+
+  return windows;
 }
 
 function resolvedTimelineClipById(options: RenderOptions) {
@@ -3316,7 +3391,7 @@ export function studioVideoTimelineDurationsForRender(
   const timeline = template?.timeline;
   const compositionDuration = layoutStudioCompositionDurationSeconds(template);
   const resolvedMainDuration = compositionDuration
-    ? Math.min(compositionDuration, requestedMainDuration)
+    ? compositionDuration
     : requestedMainDuration;
   const mainDuration = clampNumber(resolvedMainDuration, 0.1, 30, resolvedMainDuration);
   const introDurationOverride = options.layoutStudioAssets?.introDurationSeconds ?? null;
@@ -3895,6 +3970,7 @@ export async function renderJob(jobId: string) {
   const studioBackgroundOverlayInputs: StudioBackgroundOverlayInput[] = [];
   const studioMediaOverlayInputs: StudioMediaOverlayInput[] = [];
   let resolvedStudioElements: LayoutStudioResolvedElement[] | undefined;
+  let studioElementTimelineWindowInputs: StudioElementTimelineWindowsByElementId | undefined;
 
   if (studioTemplate) {
     const resolvedClips = resolvedTimelineClipById(renderOptions);
@@ -3905,6 +3981,7 @@ export async function renderJob(jobId: string) {
       studioMediaDimensionsByElementId,
     );
     resolvedStudioElements = elements;
+    studioElementTimelineWindowInputs = layoutStudioElementTimelineWindows(studioTemplate, elements);
     const elementById = new Map(
       elements
         .filter((element) => element.id)
@@ -4061,6 +4138,7 @@ export async function renderJob(jobId: string) {
     studioTextOverlays: studioTextOverlayInputs,
     mediaDimensionsByElementId: studioMediaDimensionsByElementId,
     resolvedLayoutStudioElements: resolvedStudioElements,
+    studioElementTimelineWindows: studioElementTimelineWindowInputs,
     studioTimeline: studioTemplate
       ? {
           mainStartSeconds: studioMainStartSeconds,
