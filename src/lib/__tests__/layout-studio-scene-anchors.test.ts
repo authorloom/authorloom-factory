@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   isLayoutStudioTimelineMediaOverlayLayer,
   layoutStudioCompositionDurationSeconds,
+  primaryLayoutStudioScreenshotElementKey,
   resolveLayoutStudioElementsForRender,
   resolveLayoutStudioSceneTextElementForRender,
   studioVideoTimelineDurationsForRender,
@@ -145,6 +146,17 @@ test("Layout Studio screenshot timeline clips do not become duplicate media over
   assert.equal(isLayoutStudioTimelineMediaOverlayLayer("screenshot"), false);
   assert.equal(isLayoutStudioTimelineMediaOverlayLayer("image"), true);
   assert.equal(isLayoutStudioTimelineMediaOverlayLayer("cover"), true);
+});
+
+test("Layout Studio duplicate screenshot elements use the top-most slot", () => {
+  assert.equal(
+    primaryLayoutStudioScreenshotElementKey([
+      { id: "hook-1", type: "hook", x: 120, y: 265 },
+      { id: "screenshot-behind", type: "screenshot", x: 141, y: 281 },
+      { id: "screenshot-front", type: "screenshot", x: 120, y: 384 },
+    ]),
+    "screenshot-front",
+  );
 });
 
 test("hook stacked above screenshot uses tall screenshot rendered box", async () => {

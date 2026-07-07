@@ -1396,6 +1396,7 @@ function buildLayoutStudioFilterComplex({
     const key = studioElementKey(overlay.element);
     mediaOverlaysByElementId.set(key, [...(mediaOverlaysByElementId.get(key) ?? []), overlay]);
   }
+  const primaryScreenshotElementKey = primaryLayoutStudioScreenshotElementKey(elements);
   const filters = [...baseFilters];
   let currentLabel = "bg";
   let mediaIndex = 0;
@@ -1440,6 +1441,12 @@ function buildLayoutStudioFilterComplex({
       }
 
       if (elementType !== "screenshot") continue;
+      if (
+        primaryScreenshotElementKey &&
+        studioElementKey(element) !== primaryScreenshotElementKey
+      ) {
+        continue;
+      }
 
       const media = fitMediaIntoStudioElement(element, screenshotDimensions);
       filters.push(
@@ -1558,6 +1565,13 @@ function rotatedElementPadding(element: LayoutStudioResolvedElement) {
 
 function studioElementKey(element: Pick<LayoutStudioElement, "id" | "type" | "x" | "y">) {
   return element.id ?? `${element.type ?? "element"}:${element.x ?? 0}:${element.y ?? 0}`;
+}
+
+export function primaryLayoutStudioScreenshotElementKey(
+  elements: Array<Pick<LayoutStudioElement, "id" | "type" | "x" | "y">>,
+) {
+  const screenshotElement = [...elements].reverse().find((element) => element.type === "screenshot");
+  return screenshotElement ? studioElementKey(screenshotElement) : null;
 }
 
 function ffmpegEnableWindow(startSeconds: number, endSeconds: number) {
