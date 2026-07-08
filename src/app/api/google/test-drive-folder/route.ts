@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { extractDriveIdFromUrl, getDriveFile } from "@/lib/google";
-import { requireInternalApiAccess } from "@/lib/internal-api-auth";
 
 export const runtime = "nodejs";
 
@@ -11,9 +10,6 @@ const testDriveFolderSchema = z.object({
 });
 
 export async function POST(request: Request) {
-  const unauthorized = requireInternalApiAccess(request);
-  if (unauthorized) return unauthorized;
-
   try {
     const payload = testDriveFolderSchema.safeParse(await request.json());
 

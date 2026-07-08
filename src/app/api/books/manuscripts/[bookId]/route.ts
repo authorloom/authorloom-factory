@@ -10,7 +10,6 @@ import {
   getFileExtension,
   manuscriptExtensions,
 } from "@/lib/files";
-import { requireInternalApiAccess } from "@/lib/internal-api-auth";
 import { paths } from "@/lib/paths";
 
 export const runtime = "nodejs";
@@ -91,12 +90,6 @@ export async function GET(_request: Request, context: BookManuscriptContext) {
 }
 
 export async function POST(request: Request, context: BookManuscriptContext) {
-  const unauthorized = requireInternalApiAccess(request);
-
-  if (unauthorized) {
-    return unauthorized;
-  }
-
   try {
     const { bookId } = await context.params;
     const book = getBook(bookId);

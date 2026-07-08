@@ -10,7 +10,6 @@ import {
   createStoredFilename,
   getFileExtension,
 } from "@/lib/files";
-import { requireInternalApiAccess } from "@/lib/internal-api-auth";
 import { paths } from "@/lib/paths";
 
 export const runtime = "nodejs";
@@ -79,12 +78,6 @@ export async function GET(_request: Request, context: BookCoverContext) {
 }
 
 export async function POST(request: Request, context: BookCoverContext) {
-  const unauthorized = requireInternalApiAccess(request);
-
-  if (unauthorized) {
-    return unauthorized;
-  }
-
   try {
     const { bookId } = await context.params;
     const book = getBook(bookId);

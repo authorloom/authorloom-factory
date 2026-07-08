@@ -10,7 +10,6 @@ import {
   getAudioAsset,
   updateAudioAssetTags,
 } from "@/lib/db";
-import { requireInternalApiAccess } from "@/lib/internal-api-auth";
 import { paths } from "@/lib/paths";
 
 export const runtime = "nodejs";
@@ -175,9 +174,6 @@ export async function GET(request: Request, context: AudioAssetContext) {
 }
 
 export async function DELETE(request: Request, context: AudioAssetContext) {
-  const unauthorized = requireInternalApiAccess(request);
-  if (unauthorized) return unauthorized;
-
   try {
     const { audioId } = await context.params;
     const deletedAudio = deleteUnusedAudioAsset(audioId);
@@ -196,9 +192,6 @@ export async function DELETE(request: Request, context: AudioAssetContext) {
 }
 
 export async function PATCH(request: Request, context: AudioAssetContext) {
-  const unauthorized = requireInternalApiAccess(request);
-  if (unauthorized) return unauthorized;
-
   try {
     const { audioId } = await context.params;
     const payload = audioTagsSchema.safeParse(await request.json());
