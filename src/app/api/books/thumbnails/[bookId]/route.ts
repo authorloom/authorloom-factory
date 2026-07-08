@@ -10,6 +10,7 @@ import {
   getFileExtension,
   screenshotImageExtensions,
 } from "@/lib/files";
+import { requireInternalApiAccess } from "@/lib/internal-api-auth";
 import { paths } from "@/lib/paths";
 
 export const runtime = "nodejs";
@@ -94,6 +95,9 @@ export async function GET(request: Request, context: BookThumbnailRouteContext) 
 }
 
 export async function POST(request: Request, context: BookThumbnailRouteContext) {
+  const unauthorized = requireInternalApiAccess(request);
+  if (unauthorized) return unauthorized;
+
   try {
     const { bookId } = await context.params;
     const book = getBook(bookId);

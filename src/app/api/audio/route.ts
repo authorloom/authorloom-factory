@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { importAudioFromSource } from "@/lib/audio";
+import { requireInternalApiAccess } from "@/lib/internal-api-auth";
 
 export const runtime = "nodejs";
 
@@ -11,6 +12,9 @@ const globalAudioImportSchema = z.object({
 });
 
 export async function POST(request: Request) {
+  const unauthorized = requireInternalApiAccess(request);
+  if (unauthorized) return unauthorized;
+
   try {
     const payload = globalAudioImportSchema.safeParse(await request.json());
 
