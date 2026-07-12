@@ -27,6 +27,11 @@ import { renderJob } from "../src/lib/ffmpeg";
 import { env } from "../src/lib/env";
 import { getGoogleServiceAccountAuth } from "../src/lib/google-auth";
 import { paths } from "../src/lib/paths";
+import {
+  selectProductionMediaSource,
+  type MediaSourceAsset,
+  type SelectedMediaSource,
+} from "../src/lib/media-source-policy";
 import { slugifyCampaignName, slugifyName } from "../src/lib/slugs";
 
 const api = anyApi;
@@ -223,7 +228,7 @@ async function fetchWithRetries(
   throw lastError instanceof Error ? lastError : new Error(`${context} failed.`);
 }
 
-type RenderAssetRef = {
+type RenderAssetRef = MediaSourceAsset & {
   assetId: string;
   type: string;
   filename?: string | null;
@@ -232,10 +237,6 @@ type RenderAssetRef = {
   previewUrl?: string | null;
   renderSourceUrl?: string | null;
   renderSourceMimeType?: string | null;
-  sourceMediaId?: string | null;
-  previewMediaId?: string | null;
-  thumbnailMediaId?: string | null;
-  renderSourceMediaId?: string | null;
   audioUrl?: string | null;
   text?: string | null;
 };
@@ -546,37 +547,46 @@ function validateRenderInstruction(input: {
     errors.push(`${prefix}.backgroundAssetId is required.`);
   }
   if (!video.hookAssetId) errors.push(`${prefix}.hookAssetId is required.`);
-  const screenshotSourceUrl =
-    video.assets?.screenshot?.renderSourceUrl ??
-    video.assets?.screenshot?.previewUrl ??
-    null;
-  const backgroundSourceUrl =
-    video.assets?.background?.renderSourceUrl ??
-    video.assets?.background?.previewUrl ??
-    null;
+  let screenshotSource: SelectedMediaSource | null = null;
+  let backgroundSource: SelectedMediaSource | null = null;
 
-  if (!screenshotSourceUrl) {
+  try {
+    screenshotSource = video.assets?.screenshot
+      ? selectProductionMediaSource(video.assets.screenshot)
+      : null;
+    backgroundSource = video.assets?.background
+      ? selectProductionMediaSource(video.assets.background)
+      : null;
+  } catch (error) {
+    errors.push(`${prefix}: ${compactErrorMessage(error)}`);
+  }
+
+  if (!screenshotSource?.mediaId && !screenshotSource?.url && !video.assets?.screenshot?.driveFileId) {
     errors.push(
-      `${prefix}.assets.screenshot.renderSourceUrl or previewUrl is required.`,
+      `${prefix}.assets.screenshot requires canonical media, a source URL, or a legacy Drive fallback.`,
     );
   }
-  if (!backgroundSourceUrl) {
+  if (!backgroundSource?.mediaId && !backgroundSource?.url && !video.assets?.background?.driveFileId) {
     errors.push(
-      `${prefix}.assets.background.renderSourceUrl or previewUrl is required.`,
+      `${prefix}.assets.background requires canonical media, a source URL, or a legacy Drive fallback.`,
     );
   }
   if (!video.assets?.hook?.text?.trim()) {
     errors.push(`${prefix}.assets.hook.text is required.`);
   }
-  const audioSourceUrl =
-    video.assets.audio?.audioUrl ??
-    video.assets.audio?.renderSourceUrl ??
-    video.assets.audio?.previewUrl ??
-    null;
-  if ((video.audioAssetId || video.audioTrackId) && !audioSourceUrl) {
-    errors.push(
-      `${prefix}.assets.audio.renderSourceUrl, audioUrl, or previewUrl is required when an audio asset is set.`,
-    );
+  if ((video.audioAssetId || video.audioTrackId) && !video.assets.audio) {
+    errors.push(`${prefix}.assets.audio is required when an audio asset is set.`);
+  } else if ((video.audioAssetId || video.audioTrackId) && video.assets.audio) {
+    try {
+      const audioSource = selectProductionMediaSource(video.assets.audio);
+      if (!audioSource.mediaId && !audioSource.url && !video.assets.audio.driveFileId) {
+        errors.push(
+          `${prefix}.assets.audio requires canonical media, a source URL, or a legacy Drive fallback when an audio asset is set.`,
+        );
+      }
+    } catch (error) {
+      errors.push(`${prefix}: ${compactErrorMessage(error)}`);
+    }
   }
   if (!video.outputFilename?.trim()) {
     console.warn(`${prefix}.outputFilename is missing; the factory upload step will use the local render filename.`);
@@ -888,14 +898,20 @@ async function uploadRenderedPreviewToStorage(input: {
 
 async function ensureSourceFileDownloaded(input: {
   asset?: RenderAssetRef | null;
+  selection?: SelectedMediaSource | null;
   sourceUrl?: string | null;
   filename?: string | null;
   directory: string;
   fallbackFilename: string;
 }) {
-  const mediaSource = input.asset ? await resolveMediaSource(input.asset) : null;
+  const selection = input.selection ?? (input.asset ? selectProductionMediaSource(input.asset) : null);
+  const mediaSource = input.asset && selection?.mediaId
+    ? await resolveMediaSource(input.asset, selection)
+    : null;
 
-  if (!input.sourceUrl && !mediaSource && !input.asset?.driveFileId) {
+  const selectedUrl = resolveSourceUrl(selection?.url) ?? input.sourceUrl ?? null;
+
+  if (!selectedUrl && !mediaSource && !input.asset?.driveFileId) {
     throw new Error(`${input.fallbackFilename} is missing a GCS render source URL.`);
   }
 
@@ -916,10 +932,10 @@ async function ensureSourceFileDownloaded(input: {
 
   try {
     const sourceLabel = mediaSource
-      ? `${mediaSource.bucketName}/${mediaSource.objectName}`
-      : input.sourceUrl;
+      ? `canonical ${selection?.purpose ?? "source"} ${selection?.kind ?? "media"}`
+      : `legacy ${selection?.kind ?? "media"} URL`;
 
-    console.log(`Downloading source asset ${sourceLabel} -> ${filepath}`);
+    console.log(`Downloading ${sourceLabel} for ${input.asset?.assetId ?? input.fallbackFilename} -> ${filepath}`);
 
     if (mediaSource) {
       await downloadStorageObjectFromBucket(
@@ -931,7 +947,7 @@ async function ensureSourceFileDownloaded(input: {
       return filepath;
     }
 
-    const sourceUrl = input.sourceUrl;
+    const sourceUrl = selectedUrl;
 
     if (!sourceUrl) {
       throw new Error(`${input.fallbackFilename} is missing a GCS render source URL.`);
@@ -949,12 +965,12 @@ async function ensureSourceFileDownloaded(input: {
         {
           headers: sourceRequestHeaders(sourceUrl),
         },
-        `Download source asset ${sourceUrl}`,
+        `Download source asset ${input.asset?.assetId ?? input.fallbackFilename}`,
       );
       if (!response.ok) {
         const body = await response.text().catch(() => "");
         throw new Error(
-          `Could not download source asset from ${sourceUrl}: ${response.status} ${response.statusText} ${body.slice(
+          `Could not download source asset ${input.asset?.assetId ?? input.fallbackFilename}: ${response.status} ${response.statusText} ${body.slice(
             0,
             300,
           )}`,
@@ -1006,32 +1022,13 @@ async function downloadDriveFileToPath(fileId: string, filepath: string) {
   );
 }
 
-function mediaIdForAsset(asset: RenderAssetRef) {
-  if (asset.type === "background") {
-    return (
-      asset.renderSourceMediaId ??
-      asset.sourceMediaId ??
-      asset.previewMediaId ??
-      asset.thumbnailMediaId ??
-      null
-    );
-  }
+async function resolveMediaSource(asset: RenderAssetRef, selection: SelectedMediaSource) {
+  const mediaId = selection.mediaId;
+  if (!mediaId) return null;
 
-  return (
-    asset.renderSourceMediaId ??
-    asset.sourceMediaId ??
-    asset.previewMediaId ??
-    asset.thumbnailMediaId ??
-    null
+  console.log(
+    `Selected production media for ${asset.assetId}: purpose=${selection.purpose} kind=${selection.kind}.`,
   );
-}
-
-async function resolveMediaSource(asset: RenderAssetRef) {
-  const mediaId = mediaIdForAsset(asset);
-
-  if (!mediaId) {
-    return null;
-  }
 
   const result = await client.query(api.productionJobs.workerMediaSource, {
     workerSecret: requiredWorkerSecret,
@@ -1585,27 +1582,23 @@ async function prepareLocalRenderJob(input: {
   localCampaignId: string;
   localBatchId: string;
 }) {
-  const screenshotPreviewUrl =
-    resolveSourceUrl(input.video.assets.screenshot.renderSourceUrl) ??
-    resolveSourceUrl(input.video.assets.screenshot.previewUrl);
+  const screenshotSelection = selectProductionMediaSource(input.video.assets.screenshot);
+  const screenshotPreviewUrl = resolveSourceUrl(screenshotSelection.url);
   const screenshotFile = await ensureSourceFileDownloaded({
     asset: input.video.assets.screenshot,
+    selection: screenshotSelection,
     sourceUrl: screenshotPreviewUrl,
-    filename: screenshotPreviewUrl
-      ? `${input.video.screenshotAssetId}.jpg`
-      : input.video.assets.screenshot.filename,
+    filename: sourceFilename(input.video.assets.screenshot, screenshotSelection, input.video.screenshotAssetId),
     directory: path.join(paths.screenshotsDirectory, input.localBookId),
     fallbackFilename: `${input.video.screenshotAssetId}.jpg`,
   });
-  const backgroundSourceUrl =
-    resolveSourceUrl(input.video.assets.background.renderSourceUrl) ??
-    resolveSourceUrl(input.video.assets.background.previewUrl);
+  const backgroundSelection = selectProductionMediaSource(input.video.assets.background);
+  const backgroundSourceUrl = resolveSourceUrl(backgroundSelection.url);
   const backgroundFile = await ensureSourceFileDownloaded({
     asset: input.video.assets.background,
+    selection: backgroundSelection,
     sourceUrl: backgroundSourceUrl,
-    filename: backgroundSourceUrl
-      ? `${input.video.backgroundAssetId}${path.extname(input.video.assets.background.filename ?? "") || ".mp4"}`
-      : input.video.assets.background.filename,
+    filename: sourceFilename(input.video.assets.background, backgroundSelection, input.video.backgroundAssetId),
     directory: path.join(paths.backgroundsDirectory, input.localBookId),
     fallbackFilename: `${input.video.backgroundAssetId}.mp4`,
   });
@@ -1773,23 +1766,16 @@ async function prepareTimelineVideoPostAssets(input: {
 
         if (!asset) return clipRecord;
 
-        const sourceUrl =
-          resolveSourceUrl(asset.renderSourceUrl) ??
-          resolveSourceUrl(asset.previewUrl) ??
-          resolveSourceUrl(asset.audioUrl) ??
-          null;
         const isTextAsset = ["hook", "cta", "keyword", "trope", "metadata"].includes(asset.type);
 
-        if (isTextAsset && !sourceUrl) {
-          return {
-            ...clipRecord,
-            asset,
-          };
+        if (isTextAsset) {
+          return { ...clipRecord, asset };
         }
 
-        const extension =
-          path.extname(asset.filename ?? "") ||
-          (asset.renderSourceMimeType?.includes("video") ? ".mp4" : ".jpg");
+        const selection = selectProductionMediaSource(asset);
+        const sourceUrl = resolveSourceUrl(selection.url);
+
+        const extension = sourceExtension(asset, selection);
         const directory = ["background", "backgroundImage"].includes(asset.type)
           ? path.join(paths.backgroundsDirectory, input.localBookId)
           : ["cover", "coverImage", "thumbnail"].includes(asset.type)
@@ -1797,8 +1783,9 @@ async function prepareTimelineVideoPostAssets(input: {
             : path.join(paths.screenshotsDirectory, input.localBookId);
         const filepath = await ensureSourceFileDownloaded({
           asset,
+          selection,
           sourceUrl,
-          filename: sourceUrl ? `${asset.assetId}${extension}` : asset.filename,
+          filename: `${asset.assetId}${extension}`,
           directory,
           fallbackFilename: `${asset.assetId}${extension}`,
         });
@@ -1888,18 +1875,18 @@ async function prepareSceneAssetRef(input: {
   }
 
   const asset = input.asset as RenderAssetRef;
-  const sourceUrl =
-    resolveSourceUrl(asset.renderSourceUrl) ??
-    resolveSourceUrl(asset.previewUrl);
+  const selection = selectProductionMediaSource(asset);
+  const sourceUrl = resolveSourceUrl(selection.url);
 
-  if (!sourceUrl && !mediaIdForAsset(asset)) {
+  if (!sourceUrl && !selection.mediaId && !asset.driveFileId) {
     return asset;
   }
 
   const assetId = asset.assetId ?? `scene-${input.sceneIndex + 1}-${input.slot}`;
-  const extension = path.extname(asset.filename ?? "") || fallbackExtensionForAsset(asset);
+  const extension = sourceExtension(asset, selection);
   const filepath = await ensureSourceFileDownloaded({
     asset,
+    selection,
     sourceUrl,
     filename: `${assetId}${extension}`,
     directory: path.join(paths.backgroundsDirectory, input.localBookId, "scenes"),
@@ -1924,6 +1911,30 @@ function fallbackExtensionForAsset(asset: RenderAssetRef) {
   if (mimeType.includes("webm")) return ".webm";
   if (asset.type === "background") return ".mp4";
   return ".jpg";
+}
+
+function sourceFilename(
+  asset: RenderAssetRef,
+  selection: SelectedMediaSource,
+  fallbackStem: string,
+) {
+  const extension = sourceExtension(asset, selection);
+  return `${fallbackStem}${extension}`;
+}
+
+function sourceExtension(asset: RenderAssetRef, selection: SelectedMediaSource) {
+  return extensionForMime(selection.mimeType) || path.extname(asset.filename ?? "") || fallbackExtensionForAsset(asset);
+}
+
+function extensionForMime(mimeType?: string | null) {
+  const value = mimeType?.toLowerCase() ?? "";
+  if (value.includes("png")) return ".png";
+  if (value.includes("webp")) return ".webp";
+  if (value.includes("jpeg") || value.includes("jpg")) return ".jpg";
+  if (value.includes("mp4")) return ".mp4";
+  if (value.includes("quicktime")) return ".mov";
+  if (value.includes("webm")) return ".webm";
+  return "";
 }
 
 async function processRenderCampaign(job: ClaimedJob) {
