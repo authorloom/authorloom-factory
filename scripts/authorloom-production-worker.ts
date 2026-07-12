@@ -28,10 +28,15 @@ import { env } from "../src/lib/env";
 import { getGoogleServiceAccountAuth } from "../src/lib/google-auth";
 import { paths } from "../src/lib/paths";
 import {
+  assetDisposition,
   selectProductionMediaSource,
   type MediaSourceAsset,
   type SelectedMediaSource,
 } from "../src/lib/media-source-policy";
+import {
+  downloadWithDriveFallback,
+  filenameForCanonicalContentType,
+} from "../src/lib/worker-media-download";
 import { slugifyCampaignName, slugifyName } from "../src/lib/slugs";
 
 const api = anyApi;
@@ -905,20 +910,31 @@ async function ensureSourceFileDownloaded(input: {
   fallbackFilename: string;
 }) {
   const selection = input.selection ?? (input.asset ? selectProductionMediaSource(input.asset) : null);
-  const mediaSource = input.asset && selection?.mediaId
-    ? await resolveMediaSource(input.asset, selection)
-    : null;
+  let mediaSource: Awaited<ReturnType<typeof resolveMediaSource>> = null;
+  let mediaLookupError: unknown = null;
+  if (input.asset && selection?.mediaId) {
+    try {
+      mediaSource = await resolveMediaSource(input.asset, selection);
+    } catch (error) {
+      mediaLookupError = error;
+    }
+  }
 
   const selectedUrl = resolveSourceUrl(selection?.url) ?? input.sourceUrl ?? null;
 
   if (!selectedUrl && !mediaSource && !input.asset?.driveFileId) {
+    if (mediaLookupError) throw mediaLookupError;
     throw new Error(`${input.fallbackFilename} is missing a GCS render source URL.`);
   }
 
   await fs.mkdir(input.directory, { recursive: true });
-  const filename = safeFilename(
+  const requestedFilename = safeFilename(
     input.filename ?? mediaSource?.filename,
     input.fallbackFilename,
+  );
+  const filename = filenameForCanonicalContentType(
+    requestedFilename,
+    mediaSource?.contentType,
   );
   const filepath = path.join(input.directory, filename);
 
@@ -930,69 +946,46 @@ async function ensureSourceFileDownloaded(input: {
     // Download below.
   }
 
-  try {
-    const sourceLabel = mediaSource
-      ? `canonical ${selection?.purpose ?? "source"} ${selection?.kind ?? "media"}`
-      : `legacy ${selection?.kind ?? "media"} URL`;
+  const sourceLabel = mediaSource
+    ? `canonical ${selection?.purpose ?? "source"} ${selection?.kind ?? "media"}`
+    : `legacy ${selection?.kind ?? "media"} source`;
+  console.log(`Downloading ${sourceLabel} for ${input.asset?.assetId ?? input.fallbackFilename} -> ${filepath}`);
 
-    console.log(`Downloading ${sourceLabel} for ${input.asset?.assetId ?? input.fallbackFilename} -> ${filepath}`);
-
-    if (mediaSource) {
-      await downloadStorageObjectFromBucket(
-        mediaSource.bucketName,
-        mediaSource.objectName,
-        filepath,
-      );
-      console.log(`Source asset downloaded: ${filepath}`);
-      return filepath;
-    }
-
-    const sourceUrl = selectedUrl;
-
-    if (!sourceUrl) {
-      throw new Error(`${input.fallbackFilename} is missing a GCS render source URL.`);
-    }
-
-    const previewObjectName =
-      getPreviewObjectNameFromUrl(sourceUrl) ??
-      getStorageObjectNameFromUrl(sourceUrl);
-
-    if (previewObjectName) {
-      await downloadPreviewObjectFromStorage(previewObjectName, filepath);
-    } else {
+  await downloadWithDriveFallback({
+    driveFileId: input.asset?.driveFileId,
+    primary: async () => {
+      if (mediaLookupError) throw mediaLookupError;
+      if (mediaSource) {
+        await downloadStorageObjectFromBucket(mediaSource.bucketName, mediaSource.objectName, filepath);
+        return;
+      }
+      const sourceUrl = selectedUrl;
+      if (!sourceUrl) throw new Error(`${input.fallbackFilename} is missing a production media source.`);
+      const previewObjectName = getPreviewObjectNameFromUrl(sourceUrl) ?? getStorageObjectNameFromUrl(sourceUrl);
+      if (previewObjectName) {
+        await downloadPreviewObjectFromStorage(previewObjectName, filepath);
+        return;
+      }
       const response = await fetchWithRetries(
         sourceUrl,
-        {
-          headers: sourceRequestHeaders(sourceUrl),
-        },
+        { headers: sourceRequestHeaders(sourceUrl) },
         `Download source asset ${input.asset?.assetId ?? input.fallbackFilename}`,
       );
       if (!response.ok) {
         const body = await response.text().catch(() => "");
         throw new Error(
-          `Could not download source asset ${input.asset?.assetId ?? input.fallbackFilename}: ${response.status} ${response.statusText} ${body.slice(
-            0,
-            300,
-          )}`,
+          `Could not download source asset ${input.asset?.assetId ?? input.fallbackFilename}: ${response.status} ${response.statusText} ${body.slice(0, 300)}`,
         );
       }
-      const buffer = Buffer.from(await response.arrayBuffer());
-      await fs.writeFile(filepath, buffer);
-    }
-    console.log(`Source asset downloaded: ${filepath}`);
-    return filepath;
-  } catch (error) {
-    if (!input.asset?.driveFileId) {
-      throw error;
-    }
-
-    console.warn(
-      `Primary source download failed for ${input.asset.assetId}; falling back to Drive file ${input.asset.driveFileId}: ${compactErrorMessage(error)}`,
-    );
-    await downloadDriveFileToPath(input.asset.driveFileId, filepath);
-    console.log(`Source asset downloaded from Drive: ${filepath}`);
-    return filepath;
-  }
+      await fs.writeFile(filepath, Buffer.from(await response.arrayBuffer()));
+    },
+    drive: (driveFileId) => downloadDriveFileToPath(driveFileId, filepath),
+    onFallback: () => console.warn(
+      `Primary source failed for ${input.asset?.assetId ?? input.fallbackFilename}; falling back to Drive.`,
+    ),
+  });
+  console.log(`Source asset downloaded: ${filepath}`);
+  return filepath;
 }
 
 async function downloadDriveFileToPath(fileId: string, filepath: string) {
@@ -1037,8 +1030,10 @@ async function resolveMediaSource(asset: RenderAssetRef, selection: SelectedMedi
     success: boolean;
     message?: string;
     media?: {
+      kind?: string | null;
       bucketName?: string | null;
       objectName?: string | null;
+      contentType?: string | null;
       filename?: string | null;
     } | null;
   };
@@ -1049,10 +1044,19 @@ async function resolveMediaSource(asset: RenderAssetRef, selection: SelectedMedi
     );
   }
 
+  const canonicalKind = result.media.kind?.trim().toLowerCase();
+  const expectedKind = selection.kind === "still" ? "image" : selection.kind;
+  if (canonicalKind && canonicalKind !== expectedKind && canonicalKind !== selection.kind) {
+    throw new Error(
+      `Canonical media for ${asset.assetId} has kind ${canonicalKind}; expected ${expectedKind}.`,
+    );
+  }
+
   return {
     bucketName: result.media.bucketName,
     objectName: result.media.objectName,
     filename: result.media.filename ?? asset.filename ?? null,
+    contentType: result.media.contentType ?? null,
   };
 }
 
@@ -1603,13 +1607,12 @@ async function prepareLocalRenderJob(input: {
     fallbackFilename: `${input.video.backgroundAssetId}.mp4`,
   });
   const thumbnailAsset = input.video.assets.thumbnail ?? null;
-  const thumbnailSourceUrl = thumbnailAsset
-    ? resolveSourceUrl(thumbnailAsset.renderSourceUrl) ??
-      resolveSourceUrl(thumbnailAsset.previewUrl)
-    : null;
-  const thumbnailFile = thumbnailSourceUrl
+  const thumbnailSelection = thumbnailAsset ? selectProductionMediaSource(thumbnailAsset) : null;
+  const thumbnailSourceUrl = resolveSourceUrl(thumbnailSelection?.url);
+  const thumbnailFile = thumbnailAsset && thumbnailSelection && hasDownloadSource(thumbnailAsset, thumbnailSelection)
     ? await ensureSourceFileDownloaded({
         asset: thumbnailAsset,
+        selection: thumbnailSelection,
         sourceUrl: thumbnailSourceUrl,
         filename: thumbnailSourceUrl
           ? `${input.video.thumbnailAssetId ?? "thumbnail"}.jpg`
@@ -1619,13 +1622,12 @@ async function prepareLocalRenderJob(input: {
       })
     : null;
   const introAsset = input.video.assets.intro ?? null;
-  const introSourceUrl = introAsset
-    ? resolveSourceUrl(introAsset.renderSourceUrl) ??
-      resolveSourceUrl(introAsset.previewUrl)
-    : null;
-  const introFile = introSourceUrl
+  const introSelection = introAsset ? selectProductionMediaSource(introAsset) : null;
+  const introSourceUrl = resolveSourceUrl(introSelection?.url);
+  const introFile = introAsset && introSelection && hasDownloadSource(introAsset, introSelection)
     ? await ensureSourceFileDownloaded({
         asset: introAsset,
+        selection: introSelection,
         sourceUrl: introSourceUrl,
         filename: introSourceUrl
           ? `${introAsset?.assetId ?? "intro"}${path.extname(introAsset?.filename ?? "") || ".jpg"}`
@@ -1635,13 +1637,12 @@ async function prepareLocalRenderJob(input: {
       })
     : null;
   const outroAsset = input.video.assets.outro ?? null;
-  const outroSourceUrl = outroAsset
-    ? resolveSourceUrl(outroAsset.renderSourceUrl) ??
-      resolveSourceUrl(outroAsset.previewUrl)
-    : null;
-  const outroFile = outroSourceUrl
+  const outroSelection = outroAsset ? selectProductionMediaSource(outroAsset) : null;
+  const outroSourceUrl = resolveSourceUrl(outroSelection?.url);
+  const outroFile = outroAsset && outroSelection && hasDownloadSource(outroAsset, outroSelection)
     ? await ensureSourceFileDownloaded({
         asset: outroAsset,
+        selection: outroSelection,
         sourceUrl: outroSourceUrl,
         filename: outroSourceUrl
           ? `${outroAsset?.assetId ?? "outro"}${path.extname(outroAsset?.filename ?? "") || ".jpg"}`
@@ -1651,14 +1652,12 @@ async function prepareLocalRenderJob(input: {
       })
     : null;
   const audioAsset = input.video.assets.audio ?? null;
-  const audioSourceUrl =
-    resolveSourceUrl(audioAsset?.audioUrl) ??
-    resolveSourceUrl(audioAsset?.renderSourceUrl) ??
-    resolveSourceUrl(audioAsset?.previewUrl) ??
-    null;
-  const audioFile = audioSourceUrl
+  const audioSelection = audioAsset ? selectProductionMediaSource(audioAsset) : null;
+  const audioSourceUrl = resolveSourceUrl(audioSelection?.url);
+  const audioFile = audioAsset && audioSelection && hasDownloadSource(audioAsset, audioSelection)
     ? await ensureSourceFileDownloaded({
         asset: audioAsset,
+        selection: audioSelection,
         sourceUrl: audioSourceUrl,
         filename: audioAsset?.filename,
         directory: path.join(paths.audioDirectory, "authorloom"),
@@ -1766,9 +1765,8 @@ async function prepareTimelineVideoPostAssets(input: {
 
         if (!asset) return clipRecord;
 
-        const isTextAsset = ["hook", "cta", "keyword", "trope", "metadata"].includes(asset.type);
-
-        if (isTextAsset) {
+        const disposition = assetDisposition(asset.type);
+        if (disposition !== "media") {
           return { ...clipRecord, asset };
         }
 
@@ -1920,6 +1918,10 @@ function sourceFilename(
 ) {
   const extension = sourceExtension(asset, selection);
   return `${fallbackStem}${extension}`;
+}
+
+function hasDownloadSource(asset: RenderAssetRef, selection: SelectedMediaSource) {
+  return Boolean(selection.mediaId || selection.url || asset.driveFileId);
 }
 
 function sourceExtension(asset: RenderAssetRef, selection: SelectedMediaSource) {
