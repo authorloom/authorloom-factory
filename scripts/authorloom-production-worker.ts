@@ -2308,6 +2308,9 @@ async function handleRenderTask(
     workerSecret: requiredWorkerSecret,
     types: ["render_campaign_videos"],
     idempotencyKey,
+    ...(body.productionJobId
+      ? { productionJobId: body.productionJobId as Id<"productionJobs"> }
+      : {}),
   });
   const claimResult = claim as {
     success: boolean;
