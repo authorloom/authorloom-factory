@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  isLayoutStudioTimelineMediaOverlayLayer,
   layoutStudioCompositionDurationSeconds,
+  layoutStudioElementTimelineWindows,
+  primaryLayoutStudioScreenshotElementKey,
   resolveLayoutStudioElementsForRender,
   resolveLayoutStudioSceneTextElementForRender,
   studioVideoTimelineDurationsForRender,
@@ -113,7 +116,7 @@ test("Layout Studio composition duration comes from composition timeline", () =>
   );
 });
 
-test("Layout Studio composition duration does not extend requested production duration", () => {
+test("Layout Studio composition duration overrides stale fixed production duration", () => {
   assert.equal(
     studioVideoTimelineDurationsForRender(
       {
@@ -122,13 +125,13 @@ test("Layout Studio composition duration does not extend requested production du
           previewDurationSeconds: 7,
         },
         compositionTimeline: {
-          durationSeconds: 120,
+          durationSeconds: 8,
           clips: [
             {
               id: "background-clip",
               layerType: "background",
               startSeconds: 0,
-              durationSeconds: 120,
+              durationSeconds: 8,
             },
           ],
         },
@@ -136,7 +139,50 @@ test("Layout Studio composition duration does not extend requested production du
       7,
       {},
     ).mainDuration,
-    7,
+    8,
+  );
+});
+
+test("Layout Studio screenshot timeline clips do not become duplicate media overlays", () => {
+  assert.equal(isLayoutStudioTimelineMediaOverlayLayer("screenshot"), false);
+  assert.equal(isLayoutStudioTimelineMediaOverlayLayer("image"), true);
+  assert.equal(isLayoutStudioTimelineMediaOverlayLayer("cover"), true);
+});
+
+test("Layout Studio screenshot timeline clips create direct screenshot enable windows", () => {
+  const windows = layoutStudioElementTimelineWindows({
+    ...template,
+    compositionTimeline: {
+      durationSeconds: 8,
+      clips: [
+        {
+          id: "screenshot-clip",
+          elementId: "screenshot-1",
+          layerType: "screenshot",
+          startSeconds: 0,
+          durationSeconds: 6,
+        },
+        {
+          id: "cover-clip",
+          layerType: "cover",
+          startSeconds: 6,
+          durationSeconds: 2,
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(windows.get("screenshot-1"), [{ startSeconds: 0, endSeconds: 6 }]);
+});
+
+test("Layout Studio duplicate screenshot elements use the top-most slot", () => {
+  assert.equal(
+    primaryLayoutStudioScreenshotElementKey([
+      { id: "hook-1", type: "hook", x: 120, y: 265 },
+      { id: "screenshot-behind", type: "screenshot", x: 141, y: 281 },
+      { id: "screenshot-front", type: "screenshot", x: 120, y: 384 },
+    ]),
+    "screenshot-front",
   );
 });
 

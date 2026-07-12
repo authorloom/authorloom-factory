@@ -26,6 +26,15 @@ const outputVideoMaxrate = "12M";
 const outputVideoBufsize = "20M";
 const outputVideoPreset =
   process.env.AUTHORLOOM_FFMPEG_VIDEO_PRESET?.trim() || "veryfast";
+const filterComplexThreadsRaw =
+  process.env.AUTHORLOOM_FFMPEG_FILTER_COMPLEX_THREADS?.trim() ?? "1";
+const filterComplexThreadsNumber = Number(filterComplexThreadsRaw);
+const filterComplexThreads =
+  filterComplexThreadsRaw &&
+  Number.isFinite(filterComplexThreadsNumber) &&
+  filterComplexThreadsNumber > 0
+    ? String(Math.floor(filterComplexThreadsNumber))
+    : null;
 const outputAudioBitrate = "192k";
 const outputAudioSampleRate = "48000";
 const outputColorSpace = "bt709";
@@ -78,6 +87,11 @@ type MediaDimensions = {
   height: number;
 };
 
+type ImageBounds = MediaDimensions & {
+  x: number;
+  y: number;
+};
+
 type VideoColorMetadata = {
   pixelFormat?: string;
   colorRange?: string;
@@ -120,6 +134,7 @@ type RenderOptions = {
     portrait?: CanvasLayoutTemplateAlternate | null;
     landscape?: CanvasLayoutTemplateAlternate | null;
   } | null;
+  renderDiagnostics?: unknown;
   layoutStudioAssets?: {
     introFilepath?: string | null;
     introDurationSeconds?: number | null;
@@ -355,6 +370,13 @@ type StudioBackgroundOverlayInput = OverlayInput & {
   endSeconds: number;
 };
 
+type StudioElementTimelineWindow = {
+  startSeconds: number;
+  endSeconds: number;
+};
+
+type StudioElementTimelineWindowsByElementId = Map<string, StudioElementTimelineWindow[]>;
+
 function sameRenderFilepath(left: string | null | undefined, right: string | null | undefined) {
   if (!left || !right) return false;
   return path.resolve(left) === path.resolve(right);
@@ -528,8 +550,112 @@ async function fileExists(filepath: string | null) {
     .catch(() => false);
 }
 
+async function fileDebugInfo(filepath: string | null | undefined) {
+  if (!filepath) {
+    return null;
+  }
+
+  const stat = await fs.stat(filepath).catch(() => null);
+  return {
+    filepath,
+    basename: path.basename(filepath),
+    extension: path.extname(filepath).toLowerCase(),
+    exists: Boolean(stat),
+    sizeBytes: stat?.size ?? null,
+    stillImage: isStillImageFile(filepath),
+  };
+}
+
+function layoutStudioResolvedElementDiagnostics(
+  elements: LayoutStudioResolvedElement[] | undefined,
+) {
+  return (elements ?? []).map((element) => ({
+    id: element.id ?? null,
+    type: element.type ?? null,
+    x: element.x,
+    y: element.y,
+    width: element.width,
+    height: element.height,
+    rule: element.rule ?? null,
+    anchorEnabled: element.anchorEnabled ?? null,
+    anchorTargetId: element.anchorTargetId ?? null,
+    anchorSourcePoint: element.anchorSourcePoint ?? null,
+    anchorTargetPoint: element.anchorTargetPoint ?? null,
+    fit: element.fit ?? null,
+    padding: element.padding ?? null,
+    paddingX: element.paddingX ?? null,
+    paddingY: element.paddingY ?? null,
+  }));
+}
+
+function mediaDimensionsByElementDiagnostics(
+  dimensionsByElementId: LayoutStudioMediaDimensionsByElementId,
+) {
+  return [...dimensionsByElementId.entries()].map(([elementId, dimensions]) => ({
+    elementId,
+    width: dimensions.width,
+    height: dimensions.height,
+  }));
+}
+
 function isHeicFile(filepath: string) {
   return [".heic", ".heif"].includes(path.extname(filepath).toLowerCase());
+}
+
+async function detectRasterImageKind(filepath: string) {
+  try {
+    const handle = await fs.open(filepath, "r");
+    try {
+      const buffer = Buffer.alloc(32);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      const signature = buffer.subarray(0, bytesRead);
+
+      if (
+        signature.length >= 3 &&
+        signature[0] === 0xff &&
+        signature[1] === 0xd8 &&
+        signature[2] === 0xff
+      ) {
+        return "jpeg";
+      }
+      if (
+        signature.length >= 8 &&
+        signature[0] === 0x89 &&
+        signature[1] === 0x50 &&
+        signature[2] === 0x4e &&
+        signature[3] === 0x47 &&
+        signature[4] === 0x0d &&
+        signature[5] === 0x0a &&
+        signature[6] === 0x1a &&
+        signature[7] === 0x0a
+      ) {
+        return "png";
+      }
+      if (signature.subarray(0, 4).toString("ascii") === "GIF8") {
+        return "gif";
+      }
+      if (
+        signature.length >= 12 &&
+        signature.subarray(0, 4).toString("ascii") === "RIFF" &&
+        signature.subarray(8, 12).toString("ascii") === "WEBP"
+      ) {
+        return "webp";
+      }
+      if (signature.length >= 12 && signature.subarray(4, 8).toString("ascii") === "ftyp") {
+        const brand = signature.subarray(8, 12).toString("ascii").toLowerCase();
+        if (brand.includes("avif")) return "avif";
+        if (brand.includes("heic") || brand.includes("heif") || brand.includes("mif1")) {
+          return "heic";
+        }
+      }
+
+      return null;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
 }
 
 function isStillImageFile(filepath: string) {
@@ -553,6 +679,13 @@ function pushMediaInput(
     args.push("-f", "image2", "-loop", "1");
   }
   args.push("-i", filepath);
+}
+
+function pushFilterComplexInput(args: string[], filterComplex: string) {
+  if (filterComplexThreads) {
+    args.push("-filter_complex_threads", filterComplexThreads);
+  }
+  args.push("-filter_complex", filterComplex);
 }
 
 async function prepareBackgroundVideoForRender({
@@ -678,7 +811,25 @@ async function prepareScreenshotForRender({
   jobId: string;
   screenshotFilepath: string;
 }) {
+  const imageKind = await detectRasterImageKind(screenshotFilepath);
+
   if (!isHeicFile(screenshotFilepath)) {
+    if (imageKind === "jpeg") {
+      return {
+        filepath: screenshotFilepath,
+        temporary: false,
+      };
+    }
+
+    if (imageKind && ["png", "gif", "webp", "avif"].includes(imageKind)) {
+      return prepareNonJpegScreenshotForRender({
+        campaignId,
+        imageKind,
+        jobId,
+        screenshotFilepath,
+      });
+    }
+
     return {
       filepath: screenshotFilepath,
       temporary: false,
@@ -714,10 +865,12 @@ async function prepareScreenshotForRender({
     try {
       await runCommand(converter.file, converter.args, { all: true });
       await getMediaDimensions(outputFilepath);
-      return {
-        filepath: outputFilepath,
-        temporary: true,
-      };
+      return prepareNonJpegScreenshotForRender({
+        campaignId,
+        imageKind: "heic",
+        jobId,
+        screenshotFilepath: outputFilepath,
+      });
     } catch (error) {
       errors.push(`${converter.file}: ${commandErrorMessage(error)}`);
     }
@@ -726,6 +879,142 @@ async function prepareScreenshotForRender({
   throw new Error(
     `Could not convert HEIC screenshot for render.\n${errors.join("\n\n")}`,
   );
+}
+
+async function prepareNonJpegScreenshotForRender({
+  campaignId,
+  imageKind,
+  jobId,
+  screenshotFilepath,
+}: {
+  campaignId: string;
+  imageKind: string;
+  jobId: string;
+  screenshotFilepath: string;
+}) {
+  const sourceDimensions = await getMediaDimensions(screenshotFilepath);
+  const visibleBounds =
+    imageKind === "png"
+      ? await detectVisibleAlphaBounds(screenshotFilepath).catch((error) => {
+          console.warn("Could not detect PNG alpha bounds; using full image bounds", {
+            jobId,
+            source: screenshotFilepath,
+            error: commandErrorMessage(error),
+          });
+          return null;
+        })
+      : null;
+  const outputBounds = visibleBounds ?? {
+    x: 0,
+    y: 0,
+    width: sourceDimensions.width,
+    height: sourceDimensions.height,
+  };
+  const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
+  const outputFilepath = path.join(tempDirectory, `${jobId}-screenshot-normalized.jpg`);
+
+  await fs.mkdir(tempDirectory, { recursive: true });
+
+  await runCommand(
+    ffmpegBinary,
+    [
+      "-y",
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      screenshotFilepath,
+      "-filter_complex",
+      `[0:v]crop=${outputBounds.width}:${outputBounds.height}:${outputBounds.x}:${outputBounds.y},format=rgba[fg];color=c=white:s=${outputBounds.width}x${outputBounds.height}:r=1[bg];[bg][fg]overlay=0:0:format=auto,format=yuvj444p[out]`,
+      "-map",
+      "[out]",
+      "-frames:v",
+      "1",
+      "-q:v",
+      "2",
+      outputFilepath,
+    ],
+    { all: true },
+  );
+
+  const convertedDimensions = await getMediaDimensions(outputFilepath);
+  if (
+    convertedDimensions.width !== outputBounds.width ||
+    convertedDimensions.height !== outputBounds.height
+  ) {
+    throw new Error(
+      `Converted ${imageKind} screenshot dimensions changed from visible bounds ${outputBounds.width}x${outputBounds.height} to ${convertedDimensions.width}x${convertedDimensions.height}.`,
+    );
+  }
+
+  console.log("Normalized non-JPEG screenshot for render", {
+    jobId,
+    imageKind,
+    source: screenshotFilepath,
+    output: outputFilepath,
+    sourceWidth: sourceDimensions.width,
+    sourceHeight: sourceDimensions.height,
+    cropX: outputBounds.x,
+    cropY: outputBounds.y,
+    width: convertedDimensions.width,
+    height: convertedDimensions.height,
+  });
+
+  return {
+    filepath: outputFilepath,
+    temporary: true,
+  };
+}
+
+async function detectVisibleAlphaBounds(filepath: string): Promise<ImageBounds | null> {
+  const result = await runCommand(
+    ffmpegBinary,
+    [
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel",
+      "info",
+      "-i",
+      filepath,
+      "-frames:v",
+      "1",
+      "-vf",
+      "alphaextract,bbox",
+      "-f",
+      "null",
+      "-",
+    ],
+    { all: true, maxBuffer: 2_000_000 },
+  );
+
+  const output = [result.stdout, result.stderr, result.all]
+    .filter((value): value is string => typeof value === "string")
+    .join("\n");
+  const matches = [...output.matchAll(/x1:(\d+)\s+x2:(\d+)\s+y1:(\d+)\s+y2:(\d+)\s+w:(\d+)\s+h:(\d+)/g)];
+  const lastMatch = matches.at(-1);
+  if (!lastMatch) return null;
+
+  const [, x1, , y1, , width, height] = lastMatch;
+  const bounds = {
+    x: Number.parseInt(x1, 10),
+    y: Number.parseInt(y1, 10),
+    width: Number.parseInt(width, 10),
+    height: Number.parseInt(height, 10),
+  };
+
+  if (
+    !Number.isFinite(bounds.x) ||
+    !Number.isFinite(bounds.y) ||
+    !Number.isFinite(bounds.width) ||
+    !Number.isFinite(bounds.height) ||
+    bounds.width <= 0 ||
+    bounds.height <= 0
+  ) {
+    return null;
+  }
+
+  return bounds;
 }
 
 function calculateLayout({
@@ -779,6 +1068,7 @@ function buildImageTextFilterComplex({
   studioTextOverlays = [],
   mediaDimensionsByElementId,
   resolvedLayoutStudioElements,
+  studioElementTimelineWindows,
   studioTimeline,
   outputLabel = "vout",
 }: {
@@ -797,6 +1087,7 @@ function buildImageTextFilterComplex({
   studioTextOverlays?: StudioTextOverlayInput[];
   mediaDimensionsByElementId?: LayoutStudioMediaDimensionsByElementId;
   resolvedLayoutStudioElements?: LayoutStudioResolvedElement[];
+  studioElementTimelineWindows?: StudioElementTimelineWindowsByElementId;
   studioTimeline?: {
     mainStartSeconds: number;
     mainEndSeconds: number;
@@ -1016,6 +1307,7 @@ function buildImageTextFilterComplex({
       studioTextOverlays,
       mediaDimensionsByElementId,
       resolvedElements: resolvedLayoutStudioElements,
+      studioElementTimelineWindows,
     });
   }
 
@@ -1171,6 +1463,7 @@ function buildLayoutStudioFilterComplex({
   studioTextOverlays,
   mediaDimensionsByElementId,
   resolvedElements,
+  studioElementTimelineWindows,
 }: {
   baseFilters: string[];
   coverOverlay?: CoverOverlayInput | null;
@@ -1187,6 +1480,7 @@ function buildLayoutStudioFilterComplex({
   studioTextOverlays: StudioTextOverlayInput[];
   mediaDimensionsByElementId?: LayoutStudioMediaDimensionsByElementId;
   resolvedElements?: LayoutStudioResolvedElement[];
+  studioElementTimelineWindows?: StudioElementTimelineWindowsByElementId;
 }) {
   const elements =
     resolvedElements ??
@@ -1206,13 +1500,16 @@ function buildLayoutStudioFilterComplex({
     const key = studioElementKey(overlay.element);
     mediaOverlaysByElementId.set(key, [...(mediaOverlaysByElementId.get(key) ?? []), overlay]);
   }
+  const primaryScreenshotElementKey = primaryLayoutStudioScreenshotElementKey(elements);
   const filters = [...baseFilters];
   let currentLabel = "bg";
   let mediaIndex = 0;
   let textIndex = 0;
   const mainEnable = studioTimeline
-    ? `:enable='between(t,${studioTimeline.mainStartSeconds},${studioTimeline.mainEndSeconds})'`
+    ? ffmpegEnableWindow(studioTimeline.mainStartSeconds, studioTimeline.mainEndSeconds)
     : "";
+  const elementEnable = (element: LayoutStudioResolvedElement) =>
+    ffmpegEnableWindows(studioElementTimelineWindows?.get(studioElementKey(element)), mainEnable);
 
   for (const element of elements) {
     const elementType = element.type;
@@ -1225,7 +1522,7 @@ function buildLayoutStudioFilterComplex({
             width: overlay.width,
             height: overlay.height,
           });
-          const enable = `:enable='between(t,${overlay.startSeconds},${overlay.endSeconds})'`;
+          const enable = ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds);
           filters.push(
             ...media.filters(`[${overlay.inputIndex}:v]`, `studio_shot_${mediaIndex}`),
             `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${enable}:eof_action=pass[studio_after_${mediaIndex}]`,
@@ -1241,20 +1538,28 @@ function buildLayoutStudioFilterComplex({
           element,
           { width: coverOverlay.width, height: coverOverlay.height },
         );
+        const enable = elementEnable(element);
         filters.push(
           ...media.filters(`[${coverOverlay.inputIndex}:v]`, `studio_cover_${mediaIndex}`),
-          `[${currentLabel}][studio_cover_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${mainEnable}:eof_action=pass[studio_after_${mediaIndex}]`,
+          `[${currentLabel}][studio_cover_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${enable}:eof_action=pass[studio_after_${mediaIndex}]`,
         );
         currentLabel = `studio_after_${mediaIndex}`;
         mediaIndex += 1;
       }
 
       if (elementType !== "screenshot") continue;
+      if (
+        primaryScreenshotElementKey &&
+        studioElementKey(element) !== primaryScreenshotElementKey
+      ) {
+        continue;
+      }
 
       const media = fitMediaIntoStudioElement(element, screenshotDimensions);
+      const enable = elementEnable(element);
       filters.push(
         ...media.filters("[1:v]", `studio_shot_${mediaIndex}`),
-        `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${mainEnable}:eof_action=pass[studio_after_${mediaIndex}]`,
+        `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${enable}:eof_action=pass[studio_after_${mediaIndex}]`,
       );
       currentLabel = `studio_after_${mediaIndex}`;
       mediaIndex += 1;
@@ -1269,7 +1574,7 @@ function buildLayoutStudioFilterComplex({
       for (const overlay of overlays) {
         const enable =
           typeof overlay.startSeconds === "number" && typeof overlay.endSeconds === "number"
-            ? `:enable='between(t,${overlay.startSeconds},${overlay.endSeconds})'`
+            ? ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds)
             : mainEnable;
         filters.push(
           ...studioOverlayInputFilters(
@@ -1294,7 +1599,7 @@ function buildLayoutStudioFilterComplex({
     const afterLabel = `studio_${key}_after`;
     filters.push(
       `[${overlay.inputIndex}:v]scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight}:(iw-ow)/2:(ih-oh)/2,setsar=1,format=rgba[${label}]`,
-      `[${currentLabel}][${label}]overlay=x=0:y=0:enable='between(t,${overlay.startSeconds},${overlay.endSeconds})'[${afterLabel}]`,
+      `[${currentLabel}][${label}]overlay=x=0:y=0${ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds)}[${afterLabel}]`,
     );
     currentLabel = afterLabel;
   }
@@ -1370,6 +1675,37 @@ function studioElementKey(element: Pick<LayoutStudioElement, "id" | "type" | "x"
   return element.id ?? `${element.type ?? "element"}:${element.x ?? 0}:${element.y ?? 0}`;
 }
 
+export function primaryLayoutStudioScreenshotElementKey(
+  elements: Array<Pick<LayoutStudioElement, "id" | "type" | "x" | "y">>,
+) {
+  const screenshotElement = [...elements].reverse().find((element) => element.type === "screenshot");
+  return screenshotElement ? studioElementKey(screenshotElement) : null;
+}
+
+function ffmpegEnableWindow(startSeconds: number, endSeconds: number) {
+  return `:enable='gte(t,${startSeconds})*lt(t,${endSeconds})'`;
+}
+
+function ffmpegEnableWindows(windows: StudioElementTimelineWindow[] | undefined, fallback: string) {
+  const validWindows = (windows ?? []).filter(
+    (window) =>
+      Number.isFinite(window.startSeconds) &&
+      Number.isFinite(window.endSeconds) &&
+      window.endSeconds > window.startSeconds,
+  );
+
+  if (validWindows.length === 0) return fallback;
+  if (validWindows.length === 1) {
+    return ffmpegEnableWindow(validWindows[0].startSeconds, validWindows[0].endSeconds);
+  }
+
+  const expression = validWindows
+    .map((window) => `gte(t,${window.startSeconds})*lt(t,${window.endSeconds})`)
+    .join("+");
+
+  return `:enable='${expression}'`;
+}
+
 function isLayoutStudioTemplate(template: CanvasLayoutTemplate | null | undefined) {
   const hasTopLevelElements = Array.isArray(template?.elements) && template.elements.length > 0;
   const hasSceneElements = Array.isArray(template?.scenes) &&
@@ -1409,6 +1745,10 @@ function timelineClipEndSeconds(clip: { startSeconds?: number; durationSeconds?:
   return startSeconds + durationSeconds;
 }
 
+export function isLayoutStudioTimelineMediaOverlayLayer(layerType: string | null | undefined) {
+  return layerType === "image" || layerType === "cover";
+}
+
 export function layoutStudioCompositionDurationSeconds(
   template: CanvasLayoutTemplate | null | undefined,
 ) {
@@ -1426,6 +1766,45 @@ export function layoutStudioCompositionDurationSeconds(
   );
 
   return duration > 0 ? duration : null;
+}
+
+export function layoutStudioElementTimelineWindows(
+  template: CanvasLayoutTemplate | null | undefined,
+  resolvedElements?: LayoutStudioResolvedElement[],
+) {
+  const elements = resolvedElements ?? (template ? layoutStudioElements(template) : []);
+  const elementById = new Map(
+    elements
+      .filter((element) => element.id)
+      .map((element) => [element.id as string, element]),
+  );
+  const fallbackElementsByType = new Map<string, Array<Pick<LayoutStudioElement, "id" | "type" | "x" | "y">>>();
+  for (const element of elements) {
+    const type = element.type ?? "";
+    if (!["screenshot", "image", "cover"].includes(type)) continue;
+    fallbackElementsByType.set(type, [...(fallbackElementsByType.get(type) ?? []), element]);
+  }
+
+  const windows: StudioElementTimelineWindowsByElementId = new Map();
+
+  for (const clip of layoutStudioTimelineClips(template)) {
+    const layerType = clip.layerType ?? "";
+    if (!["screenshot", "image", "cover"].includes(layerType)) continue;
+
+    const element =
+      (clip.elementId ? elementById.get(clip.elementId) : null) ??
+      (fallbackElementsByType.get(layerType) ?? [])[0];
+    if (!element) continue;
+
+    const startSeconds = clampNumber(clip.startSeconds, 0, 3600, 0);
+    const endSeconds = timelineClipEndSeconds(clip);
+    if (endSeconds <= startSeconds) continue;
+
+    const key = studioElementKey(element);
+    windows.set(key, [...(windows.get(key) ?? []), { startSeconds, endSeconds }]);
+  }
+
+  return windows;
 }
 
 function resolvedTimelineClipById(options: RenderOptions) {
@@ -1494,8 +1873,7 @@ async function layoutStudioMediaDimensionsByElementId({
   const timelineClips = layoutStudioTimelineClips(studioTemplate);
   for (const clip of timelineClips) {
     const layerType = clip.layerType ?? "";
-    if (!["screenshot", "image", "cover"].includes(layerType)) continue;
-    if (layerType === "screenshot") continue;
+    if (!isLayoutStudioTimelineMediaOverlayLayer(layerType)) continue;
 
     const resolved = clip.id ? resolvedClips.get(clip.id) : null;
     const filepath = resolved?.asset?.filepath ?? null;
@@ -2885,11 +3263,8 @@ async function renderSlideImage(input: {
     `[${composedOutputLabel}]scale=${canvasWidth}:${canvasHeight}:flags=lanczos,setsar=1,format=rgba[vout]`,
   ].join(";");
 
+  pushFilterComplexInput(args, filterComplex);
   args.push(
-    "-filter_complex_threads",
-    "1",
-    "-filter_complex",
-    filterComplex,
     "-frames:v",
     "1",
     "-map",
@@ -3108,7 +3483,7 @@ export function studioVideoTimelineDurationsForRender(
   const timeline = template?.timeline;
   const compositionDuration = layoutStudioCompositionDurationSeconds(template);
   const resolvedMainDuration = compositionDuration
-    ? Math.min(compositionDuration, requestedMainDuration)
+    ? compositionDuration
     : requestedMainDuration;
   const mainDuration = clampNumber(resolvedMainDuration, 0.1, 30, resolvedMainDuration);
   const introDurationOverride = options.layoutStudioAssets?.introDurationSeconds ?? null;
@@ -3687,6 +4062,7 @@ export async function renderJob(jobId: string) {
   const studioBackgroundOverlayInputs: StudioBackgroundOverlayInput[] = [];
   const studioMediaOverlayInputs: StudioMediaOverlayInput[] = [];
   let resolvedStudioElements: LayoutStudioResolvedElement[] | undefined;
+  let studioElementTimelineWindowInputs: StudioElementTimelineWindowsByElementId | undefined;
 
   if (studioTemplate) {
     const resolvedClips = resolvedTimelineClipById(renderOptions);
@@ -3697,6 +4073,7 @@ export async function renderJob(jobId: string) {
       studioMediaDimensionsByElementId,
     );
     resolvedStudioElements = elements;
+    studioElementTimelineWindowInputs = layoutStudioElementTimelineWindows(studioTemplate, elements);
     const elementById = new Map(
       elements
         .filter((element) => element.id)
@@ -3741,30 +4118,21 @@ export async function renderJob(jobId: string) {
         continue;
       }
 
-      if (!["screenshot", "image", "cover"].includes(layerType)) continue;
-
-      // The Studio screenshot element is already rendered from the prepared
-      // screenshot input in buildLayoutStudioFilterComplex. Feeding timeline
-      // screenshot clips as additional looped image inputs makes the final
-      // overlay graph much heavier and can leave ffmpeg stuck in framesync.
-      if (layerType === "screenshot") continue;
+      if (!isLayoutStudioTimelineMediaOverlayLayer(layerType)) continue;
 
       const element =
         (clip.elementId ? elementById.get(clip.elementId) : null) ??
         (fallbackElementsByType.get(layerType) ?? [])[0];
       if (!element) continue;
+
       const filepath =
-        layerType === "screenshot"
-          ? resolved?.asset?.filepath ?? preparedScreenshot.filepath
-          : resolved?.asset?.filepath ?? null;
+        resolved?.asset?.filepath ?? null;
       if (!filepath || !(await fileExists(filepath))) continue;
       const dimensions = await getMediaDimensions(filepath).catch(() =>
-        layerType === "screenshot"
-          ? screenshotDimensions
-          : {
-              width: canvasWidth,
-              height: canvasHeight,
-            },
+        ({
+          width: canvasWidth,
+          height: canvasHeight,
+        }),
       );
 
       pushMediaInput(args, filepath, {
@@ -3862,6 +4230,7 @@ export async function renderJob(jobId: string) {
     studioTextOverlays: studioTextOverlayInputs,
     mediaDimensionsByElementId: studioMediaDimensionsByElementId,
     resolvedLayoutStudioElements: resolvedStudioElements,
+    studioElementTimelineWindows: studioElementTimelineWindowInputs,
     studioTimeline: studioTemplate
       ? {
           mainStartSeconds: studioMainStartSeconds,
@@ -3893,14 +4262,11 @@ export async function renderJob(jobId: string) {
 
   const filterComplex = [
     mainFilterComplex,
-    `[${composedOutputLabel}]scale=${canvasWidth}:${canvasHeight}:flags=lanczos:in_range=${outputColorRange}:out_range=${outputColorRange}:out_color_matrix=${outputColorSpace},setsar=1,format=yuv420p[vout]`,
+    `[${composedOutputLabel}]trim=start=0:duration=${renderDurationSeconds},setpts=PTS-STARTPTS,fps=${outputFps},scale=${canvasWidth}:${canvasHeight}:flags=lanczos:in_range=${outputColorRange}:out_range=${outputColorRange}:out_color_matrix=${outputColorSpace},setsar=1,format=yuv420p[vout]`,
   ].join(";");
 
+  pushFilterComplexInput(args, filterComplex);
   args.push(
-    "-filter_complex_threads",
-    "1",
-    "-filter_complex",
-    filterComplex,
     "-t",
     renderDurationSeconds,
     "-frames:v",
@@ -3961,7 +4327,133 @@ export async function renderJob(jobId: string) {
     outputFilepath,
   );
 
+  const renderDiagnosticContext = {
+    source: "factory.ffmpeg.renderJob",
+    jobId: job.id,
+    ids: {
+      campaignId: job.campaign_id,
+      screenshotId: job.screenshot_id ?? null,
+      hookId: job.hook_id ?? null,
+      backgroundId: job.background_id ?? null,
+      thumbnailId: job.thumbnail_id ?? null,
+    },
+    upstream: renderOptions.renderDiagnostics ?? null,
+    durations: {
+      rawRequestedRenderDuration,
+      requestedMainRenderDuration,
+      requestedRenderDuration,
+      renderDuration,
+      renderDurationSeconds,
+      requiredBackgroundInputDuration,
+      backgroundDuration,
+      audioDuration,
+      audioLimitedRenderDuration,
+      studioMainStartSeconds,
+      studioMainDuration,
+      studioOutroDuration,
+    },
+    files: {
+      backgroundOriginal: await fileDebugInfo(job.background_filepath),
+      preparedBackground: await fileDebugInfo(preparedBackground.filepath),
+      screenshotOriginal: await fileDebugInfo(job.screenshot_filepath),
+      preparedScreenshot: await fileDebugInfo(preparedScreenshot.filepath),
+      thumbnail: await fileDebugInfo(job.thumbnail_filepath),
+      audio: await fileDebugInfo(job.audio_filepath),
+      output: {
+        filepath: outputFilepath,
+        basename: path.basename(outputFilepath),
+      },
+    },
+    mediaMeasurements: {
+      screenshotDimensions,
+      backgroundColorMetadata,
+      backgroundColorMetadataForRender,
+      layoutStudioMediaDimensionsByElementId:
+        mediaDimensionsByElementDiagnostics(studioMediaDimensionsByElementId),
+    },
+    layoutStudio: studioTemplate
+      ? {
+          layoutTemplate: renderOptions.layoutTemplate ?? null,
+          layoutTemplateId: renderOptions.layoutTemplateId ?? null,
+          compositionDurationSeconds: layoutStudioCompositionDurationSeconds(studioTemplate),
+          timelineGraph: null,
+          resolvedElements: layoutStudioResolvedElementDiagnostics(resolvedStudioElements),
+          textOverlayInputs: studioTextOverlayInputs.map((overlay) => ({
+            elementId: overlay.element.id ?? null,
+            elementType: overlay.element.type ?? null,
+            inputIndex: overlay.inputIndex,
+            x: overlay.element.x,
+            y: overlay.element.y,
+            elementWidth: overlay.element.width,
+            elementHeight: overlay.element.height,
+            overlayWidth: overlay.width,
+            overlayHeight: overlay.height,
+            startSeconds: overlay.startSeconds ?? null,
+            endSeconds: overlay.endSeconds ?? null,
+            rule: overlay.element.rule ?? null,
+            anchorEnabled: overlay.element.anchorEnabled ?? null,
+            anchorTargetId: overlay.element.anchorTargetId ?? null,
+          })),
+          mediaOverlayInputs: studioMediaOverlayInputs.map((overlay) => ({
+            elementId: overlay.element.id ?? null,
+            elementType: overlay.element.type ?? null,
+            inputIndex: overlay.inputIndex,
+            x: overlay.element.x,
+            y: overlay.element.y,
+            elementWidth: overlay.element.width,
+            elementHeight: overlay.element.height,
+            mediaWidth: overlay.width,
+            mediaHeight: overlay.height,
+            startSeconds: overlay.startSeconds,
+            endSeconds: overlay.endSeconds,
+          })),
+          backgroundOverlayInputs: studioBackgroundOverlayInputs,
+          topLevelCoverOverlayEnabled: hasCoverOverlay,
+          studioTimelineOwnsCover: null,
+        }
+      : null,
+    legacyOverlays: {
+      hookOverlay: hookOverlay
+        ? {
+            filepath: hookOverlay.filepath,
+            width: hookOverlay.width,
+            height: hookOverlay.height,
+          }
+        : null,
+      timedHookOverlayInputs,
+      metadataOverlay: postCopyOverlays.metadataOverlay
+        ? {
+            filepath: postCopyOverlays.metadataOverlay.filepath,
+            width: postCopyOverlays.metadataOverlay.width,
+            height: postCopyOverlays.metadataOverlay.height,
+            inputIndex: metadataOverlayInputIndex,
+          }
+        : null,
+      keywordsOverlay: postCopyOverlays.keywordsOverlay
+        ? {
+            filepath: postCopyOverlays.keywordsOverlay.filepath,
+            width: postCopyOverlays.keywordsOverlay.width,
+            height: postCopyOverlays.keywordsOverlay.height,
+            inputIndex: keywordsOverlayInputIndex,
+          }
+        : null,
+      coverInputIndex,
+      sceneVisualOverlayCount: sceneVisualOverlayInputs.length,
+    },
+    ffmpeg: {
+      inputCount: nextInputIndex,
+      filterLength: filterComplex.length,
+      outputFps,
+      outputFrames: Math.ceil(renderDuration * outputFps),
+      preset: outputVideoPreset,
+      filterComplexThreads: filterComplexThreads ?? "auto",
+      timeoutMs: ffmpegTimeoutMs,
+    },
+  };
+
   try {
+    console.log("Authorloom factory render diagnostics", renderDiagnosticContext);
+
     console.log("Render job summary:", {
       jobId: job.id,
       background: job.background_filepath,
@@ -3988,6 +4480,7 @@ export async function renderJob(jobId: string) {
       filterLength: filterComplex.length,
       output: outputFilepath,
       preset: outputVideoPreset,
+      filterComplexThreads: filterComplexThreads ?? "auto",
     });
 
     await runCommand(ffmpegBinary, args, { ignoreOutput: true });
@@ -4019,6 +4512,11 @@ export async function renderJob(jobId: string) {
     };
   } catch (error) {
     const message = commandErrorMessage(error);
+    console.error("Authorloom factory render failure diagnostics", {
+      jobId: job.id,
+      message,
+      renderDiagnosticContext,
+    });
     markRenderJobFailed(job.id, message);
     throw new Error(message);
   } finally {

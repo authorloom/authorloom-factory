@@ -686,7 +686,11 @@ function sourceRequestHeaders(url: string) {
 }
 
 function getPreviewBucketName() {
-  return env.AUTHORLOOM_PREVIEW_BUCKET ?? env.GOOGLE_CLOUD_STORAGE_BUCKET ?? null;
+  return (
+    env.AUTHORLOOM_PREVIEW_BUCKET ??
+    env.GOOGLE_CLOUD_STORAGE_BUCKET ??
+    "authorloom-previews"
+  ).trim();
 }
 
 function getPreviewObjectPrefix() {
@@ -788,7 +792,7 @@ async function downloadPreviewObjectFromStorage(
 
   if (!bucketName) {
     throw new Error(
-      "AUTHORLOOM_PREVIEW_BUCKET or GOOGLE_CLOUD_STORAGE_BUCKET is required to read render source objects directly from Cloud Storage.",
+      "Preview bucket name is empty; set AUTHORLOOM_PREVIEW_BUCKET or GOOGLE_CLOUD_STORAGE_BUCKET.",
     );
   }
 
@@ -834,7 +838,7 @@ async function uploadRenderedPreviewToStorage(input: {
 
   if (!bucketName) {
     throw new Error(
-      "AUTHORLOOM_PREVIEW_BUCKET or GOOGLE_CLOUD_STORAGE_BUCKET is not configured; rendered output cannot be staged to GCS.",
+      "Preview bucket name is empty; set AUTHORLOOM_PREVIEW_BUCKET or GOOGLE_CLOUD_STORAGE_BUCKET.",
     );
   }
 
