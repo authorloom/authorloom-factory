@@ -1,6 +1,8 @@
 import type { ExecaError } from "execa";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import studioFontkitModule from "next/dist/compiled/@next/font/dist/fontkit";
 
 import {
   getRenderJobDetails,
@@ -19,7 +21,9 @@ const ffmpegTimeoutMs = Math.max(
 
 const canvasWidth = 1080;
 const canvasHeight = 1920;
-const layoutStudioTypographyScale = 1;
+// Satori rasterizes the same TTF fractionally wider than Chromium's Studio preview.
+// This compensation keeps rendered text size and wrapping aligned with the editor.
+const layoutStudioTypographyScale = 0.96;
 const outputFps = 30;
 const outputVideoBitrate = "10M";
 const outputVideoMaxrate = "12M";
@@ -52,6 +56,16 @@ const minScreenshotWidth = 440;
 const hookScreenshotGap = 8;
 const defaultHookYOffset = 156;
 const defaultLayoutVerticalNudge = -160;
+
+type StudioFontMetrics = {
+  unitsPerEm: number;
+  layout: (text: string) => { advanceWidth: number };
+};
+
+type StudioFontkit = (fontData: Buffer) => StudioFontMetrics;
+
+const studioFontkit = studioFontkitModule as StudioFontkit;
+const studioFontMetricsCache = new Map<string, StudioFontMetrics | null>();
 
 type HookOverlayResult = {
   filepath: string;
@@ -1597,20 +1611,28 @@ function buildLayoutStudioFilterComplex({
       const timelineOverlays = mediaOverlaysByElementId.get(studioElementKey(element)) ?? [];
       if (timelineOverlays.length > 0) {
         for (const overlay of timelineOverlays) {
+          const hasContainer = studioMediaHasContainer(element);
           const media = fitMediaIntoStudioElement(element, {
             width: overlay.width,
             height: overlay.height,
-          });
+          }, { rotateContainer: hasContainer });
+          const inputPrefix = finiteTimelineInputPrefix(
+            `[${overlay.inputIndex}:v]`,
+            overlay.startSeconds,
+            overlay.endSeconds,
+          );
           filters.push(
-            ...media.filters(
-              finiteTimelineInputPrefix(
-                `[${overlay.inputIndex}:v]`,
-                overlay.startSeconds,
-                overlay.endSeconds,
-              ),
-              `studio_shot_${mediaIndex}`,
-            ),
-            `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${finiteOverlayOptions(overlay.startSeconds, overlay.endSeconds)}[studio_after_${mediaIndex}]`,
+            ...(hasContainer
+              ? studioMediaPanelFilters({
+                  element,
+                  inputLabel: inputPrefix,
+                  media,
+                  outputLabel: `studio_shot_${mediaIndex}`,
+                  startSeconds: overlay.startSeconds,
+                  endSeconds: overlay.endSeconds,
+                })
+              : media.filters(inputPrefix, `studio_shot_${mediaIndex}`)),
+            `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, hasContainer ? element.x : media.x)}:y=${studioOverlayY(element, hasContainer ? element.y : media.y)}${finiteOverlayOptions(overlay.startSeconds, overlay.endSeconds)}[studio_after_${mediaIndex}]`,
           );
           currentLabel = `studio_after_${mediaIndex}`;
           mediaIndex += 1;
@@ -1619,23 +1641,32 @@ function buildLayoutStudioFilterComplex({
       }
 
       if (elementType === "cover" && coverOverlay) {
+        const hasContainer = studioMediaHasContainer(element) && Boolean(studioTimeline);
         const media = fitMediaIntoStudioElement(
           element,
           { width: coverOverlay.width, height: coverOverlay.height },
+          { rotateContainer: hasContainer },
         );
         const enable = elementEnable(element);
+        const inputPrefix = studioTimeline
+          ? finiteTimelineInputPrefix(
+              `[${coverOverlay.inputIndex}:v]`,
+              studioTimeline.mainStartSeconds,
+              studioTimeline.mainEndSeconds,
+            )
+          : `[${coverOverlay.inputIndex}:v]`;
         filters.push(
-          ...media.filters(
-            studioTimeline
-              ? finiteTimelineInputPrefix(
-                  `[${coverOverlay.inputIndex}:v]`,
-                  studioTimeline.mainStartSeconds,
-                  studioTimeline.mainEndSeconds,
-                )
-              : `[${coverOverlay.inputIndex}:v]`,
-            `studio_cover_${mediaIndex}`,
-          ),
-          `[${currentLabel}][studio_cover_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${enable}:eof_action=pass:repeatlast=0[studio_after_${mediaIndex}]`,
+          ...(hasContainer && studioTimeline
+            ? studioMediaPanelFilters({
+                element,
+                inputLabel: inputPrefix,
+                media,
+                outputLabel: `studio_cover_${mediaIndex}`,
+                startSeconds: studioTimeline.mainStartSeconds,
+                endSeconds: studioTimeline.mainEndSeconds,
+              })
+            : media.filters(inputPrefix, `studio_cover_${mediaIndex}`)),
+          `[${currentLabel}][studio_cover_${mediaIndex}]overlay=x=${studioOverlayX(element, hasContainer ? element.x : media.x)}:y=${studioOverlayY(element, hasContainer ? element.y : media.y)}${enable}:eof_action=pass:repeatlast=0[studio_after_${mediaIndex}]`,
         );
         currentLabel = `studio_after_${mediaIndex}`;
         mediaIndex += 1;
@@ -1649,20 +1680,30 @@ function buildLayoutStudioFilterComplex({
         continue;
       }
 
-      const media = fitMediaIntoStudioElement(element, screenshotDimensions);
+      const hasContainer = studioMediaHasContainer(element) && Boolean(studioTimeline);
+      const media = fitMediaIntoStudioElement(element, screenshotDimensions, {
+        rotateContainer: hasContainer,
+      });
       const enable = elementEnable(element);
+      const inputPrefix = studioTimeline
+        ? finiteTimelineInputPrefix(
+            "[1:v]",
+            studioTimeline.mainStartSeconds,
+            studioTimeline.mainEndSeconds,
+          )
+        : "[1:v]";
       filters.push(
-        ...media.filters(
-          studioTimeline
-            ? finiteTimelineInputPrefix(
-                "[1:v]",
-                studioTimeline.mainStartSeconds,
-                studioTimeline.mainEndSeconds,
-              )
-            : "[1:v]",
-          `studio_shot_${mediaIndex}`,
-        ),
-        `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${enable}:eof_action=pass:repeatlast=0[studio_after_${mediaIndex}]`,
+        ...(hasContainer && studioTimeline
+          ? studioMediaPanelFilters({
+              element,
+              inputLabel: inputPrefix,
+              media,
+              outputLabel: `studio_shot_${mediaIndex}`,
+              startSeconds: studioTimeline.mainStartSeconds,
+              endSeconds: studioTimeline.mainEndSeconds,
+            })
+          : media.filters(inputPrefix, `studio_shot_${mediaIndex}`)),
+        `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, hasContainer ? element.x : media.x)}:y=${studioOverlayY(element, hasContainer ? element.y : media.y)}${enable}:eof_action=pass:repeatlast=0[studio_after_${mediaIndex}]`,
       );
       currentLabel = `studio_after_${mediaIndex}`;
       mediaIndex += 1;
@@ -1737,6 +1778,117 @@ function studioOverlayInputFilters(
     `${inputLabel}format=rgba[${formatted}]`,
     `[${formatted}]rotate=${rotation}:c=none:ow=rotw(iw):oh=roth(ih)[${outputLabel}]`,
   ];
+}
+
+function studioMediaHasContainer(element: LayoutStudioResolvedElement) {
+  return (
+    clampNumber(element.backgroundOpacity, 0, 100, 0) > 0 ||
+    (Boolean(element.containerOutline) && clampNumber(element.borderWidth, 0, 200, 0) > 0)
+  );
+}
+
+function ffmpegPanelColor(color: string | undefined, opacity: number) {
+  const value = color?.trim().replace(/^#/, "") ?? "";
+  const hex = /^[0-9a-fA-F]{6}$/.test(value)
+    ? value
+    : /^[0-9a-fA-F]{3}$/.test(value)
+      ? value.split("").map((channel) => `${channel}${channel}`).join("")
+      : "000000";
+  return `0x${hex}@${(clampNumber(opacity, 0, 100, 0) / 100).toFixed(3)}`;
+}
+
+function studioMediaPanelFilters({
+  element,
+  inputLabel,
+  media,
+  outputLabel,
+  startSeconds,
+  endSeconds,
+}: {
+  element: LayoutStudioResolvedElement;
+  inputLabel: string;
+  media: ReturnType<typeof fitMediaIntoStudioElement>;
+  outputLabel: string;
+  startSeconds: number;
+  endSeconds: number;
+}) {
+  const clipStartSeconds = clampNumber(startSeconds, 0, 3600, 0);
+  const clipEndSeconds = Math.max(
+    clipStartSeconds + 0.01,
+    clampNumber(endSeconds, 0.01, 3600, clipStartSeconds + 0.01),
+  );
+  const clipDurationSeconds = clipEndSeconds - clipStartSeconds;
+  const width = Math.max(1, Math.round(element.width));
+  const height = Math.max(1, Math.round(element.height));
+  const borderWidth = element.containerOutline
+    ? Math.round(clampNumber(element.borderWidth, 0, Math.min(width, height) / 2, 0))
+    : 0;
+  const radius = Math.round(clampNumber(element.borderRadius, 0, Math.min(width, height) / 2, 0));
+  const panelScale = radius > 0 || borderWidth > 0 ? 2 : 1;
+  const panelWidth = width * panelScale;
+  const panelHeight = height * panelScale;
+  const panelBorderWidth = borderWidth * panelScale;
+  const panelRadius = radius * panelScale;
+  const panelLabel = `${outputLabel}_panel`;
+  const mediaLabel = `${outputLabel}_media`;
+  const scaledMediaLabel = `${outputLabel}_media_scaled`;
+  const composedLabel = `${outputLabel}_composed`;
+  const borderRingBaseLabel = `${outputLabel}_border_ring_base`;
+  const borderRingLabel = `${outputLabel}_border_ring`;
+  const maskedLabel = `${outputLabel}_masked`;
+  const panelTiming = `format=rgba,setpts=PTS-STARTPTS${clipStartSeconds > 0 ? `,tpad=start_duration=${clipStartSeconds}:start_mode=clone,trim=start=0:duration=${clipEndSeconds},setpts=PTS-STARTPTS` : ""}`;
+  const outerRoundedExpression = `lte((X-clip(X\\,${panelRadius}\\,${panelWidth - panelRadius}))^2+(Y-clip(Y\\,${panelRadius}\\,${panelHeight - panelRadius}))^2\\,${panelRadius * panelRadius})`;
+  const innerRadius = Math.max(0, panelRadius - panelBorderWidth);
+  const innerRoundedExpression = innerRadius > 0
+    ? `lte((X-clip(X\\,${panelBorderWidth + innerRadius}\\,${panelWidth - panelBorderWidth - innerRadius}))^2+(Y-clip(Y\\,${panelBorderWidth + innerRadius}\\,${panelHeight - panelBorderWidth - innerRadius}))^2\\,${innerRadius * innerRadius})`
+    : `between(X\\,${panelBorderWidth}\\,${panelWidth - panelBorderWidth})*between(Y\\,${panelBorderWidth}\\,${panelHeight - panelBorderWidth})`;
+  const filters = [
+    `color=c=${ffmpegPanelColor(element.backgroundColor, element.backgroundOpacity ?? 0)}:s=${panelWidth}x${panelHeight}:r=${outputFps}:d=${clipDurationSeconds},${panelTiming}[${panelLabel}]`,
+    ...media.unrotatedFilters(inputLabel, mediaLabel),
+    ...(panelScale > 1 ? [`[${mediaLabel}]scale=iw*${panelScale}:ih*${panelScale}:flags=lanczos[${scaledMediaLabel}]`] : []),
+    `[${panelLabel}][${panelScale > 1 ? scaledMediaLabel : mediaLabel}]overlay=x=${Math.round((media.x - element.x) * panelScale)}:y=${Math.round((media.y - element.y) * panelScale)}:format=auto[${composedLabel}]`,
+  ];
+  let currentLabel = composedLabel;
+
+  if (borderWidth > 0) {
+    const borderedLabel = `${outputLabel}_bordered`;
+    const borderAlphaExpression = `if(${outerRoundedExpression}\\,if(${innerRoundedExpression}\\,0\\,alpha(X\\,Y))\\,0)`;
+    filters.push(
+      `color=c=${ffmpegPanelColor(element.borderColor ?? "#ffffff", 100)}:s=${panelWidth}x${panelHeight}:r=${outputFps}:d=${clipDurationSeconds},${panelTiming}[${borderRingBaseLabel}]`,
+      `[${borderRingBaseLabel}]format=rgba,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='${borderAlphaExpression}'[${borderRingLabel}]`,
+      `[${currentLabel}][${borderRingLabel}]overlay=x=0:y=0:format=auto[${borderedLabel}]`,
+    );
+    currentLabel = borderedLabel;
+  }
+
+  if (radius > 0) {
+    const alphaExpression = `if(${outerRoundedExpression}\\,alpha(X\\,Y)\\,0)`;
+    filters.push(
+      `[${currentLabel}]format=rgba,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='${alphaExpression}'[${maskedLabel}]`,
+    );
+    currentLabel = maskedLabel;
+  }
+
+  const rotation = rotationRadians(element.rotation);
+  if (!rotation) {
+    filters.push(
+      panelScale > 1
+        ? `[${currentLabel}]scale=${width}:${height}:flags=lanczos[${outputLabel}]`
+        : `[${currentLabel}]null[${outputLabel}]`,
+    );
+    return filters;
+  }
+
+  const rotationCanvas = Math.ceil(Math.sqrt(width * width + height * height));
+  const highResolutionRotationCanvas = Math.ceil(Math.sqrt(panelWidth * panelWidth + panelHeight * panelHeight));
+  filters.push(
+    `[${currentLabel}]pad=${highResolutionRotationCanvas}:${highResolutionRotationCanvas}:(ow-iw)/2:(oh-ih)/2:color=black@0[${outputLabel}_padded]`,
+    `[${outputLabel}_padded]rotate=${rotation}:c=none:ow=iw:oh=ih[${outputLabel}_rotated]`,
+    panelScale > 1
+      ? `[${outputLabel}_rotated]scale=${rotationCanvas}:${rotationCanvas}:flags=lanczos[${outputLabel}]`
+      : `[${outputLabel}_rotated]null[${outputLabel}]`,
+  );
+  return filters;
 }
 
 function rotationRadians(rotation: number | undefined) {
@@ -2228,17 +2380,21 @@ function layoutStudioTargetMediaAnchorPoint(
 function fitMediaIntoStudioElement(
   element: LayoutStudioResolvedElement,
   dimensions: MediaDimensions,
+  options: { rotateContainer?: boolean } = {},
 ) {
   const padding = clampNumber(element.padding, 0, Math.min(element.width, element.height) / 2, 0);
   const paddingX = clampNumber(element.paddingX, 0, element.width / 2, padding);
   const paddingY = clampNumber(element.paddingY, 0, element.height / 2, padding);
+  const borderWidth = element.containerOutline
+    ? clampNumber(element.borderWidth, 0, Math.min(element.width, element.height) / 2, 0)
+    : 0;
   const box = {
-    x: element.x + paddingX,
-    y: element.y + paddingY,
-    width: Math.max(1, element.width - paddingX * 2),
-    height: Math.max(1, element.height - paddingY * 2),
+    x: element.x + paddingX + borderWidth,
+    y: element.y + paddingY + borderWidth,
+    width: Math.max(1, element.width - (paddingX + borderWidth) * 2),
+    height: Math.max(1, element.height - (paddingY + borderWidth) * 2),
   };
-  const rotation = rotationRadians(element.rotation);
+  const rotation = options.rotateContainer ? null : rotationRadians(element.rotation);
   const fit = rotation ? "contain" : element.fit === "cover" ? "cover" : "contain";
   const scale = fit === "cover"
     ? Math.max(box.width / dimensions.width, box.height / dimensions.height)
@@ -2271,10 +2427,35 @@ function fitMediaIntoStudioElement(
         : (box.height - height) / 2;
   const x = Math.round(box.x + Math.max(0, horizontalOffset));
   const y = Math.round(box.y + Math.max(0, verticalOffset));
+  const unrotatedFilters = (inputLabel: string, output: string) => {
+    if (fit === "cover") {
+      const cropX =
+        element.horizontalAlign === "left"
+          ? "0"
+          : element.horizontalAlign === "right"
+            ? "iw-ow"
+            : "(iw-ow)/2";
+      const cropY =
+        element.verticalAlign === "top"
+          ? "0"
+          : element.verticalAlign === "bottom"
+            ? "ih-oh"
+            : "(ih-oh)/2";
+
+      return [
+        `${inputLabel}scale=${Math.round(box.width)}:${Math.round(box.height)}:force_original_aspect_ratio=increase,crop=${Math.round(box.width)}:${Math.round(box.height)}:${cropX}:${cropY},setsar=1,format=rgba[${output}]`,
+      ];
+    }
+
+    return [
+      `${inputLabel}scale=${width}:${height}:force_original_aspect_ratio=decrease,setsar=1,format=rgba[${output}]`,
+    ];
+  };
 
   return {
     x,
     y,
+    unrotatedFilters,
     filters(inputLabel: string, output: string) {
       const scaledOutput = `${output}_scaled`;
       const finish = (filter: string, renderedWidth: number, renderedHeight: number) => {
@@ -2292,31 +2473,11 @@ function fitMediaIntoStudioElement(
         ];
       };
 
-      if (fit === "cover") {
-        const cropX =
-          element.horizontalAlign === "left"
-            ? "0"
-            : element.horizontalAlign === "right"
-              ? "iw-ow"
-              : "(iw-ow)/2";
-        const cropY =
-          element.verticalAlign === "top"
-            ? "0"
-            : element.verticalAlign === "bottom"
-              ? "ih-oh"
-              : "(ih-oh)/2";
-
-        return finish(
-          `${inputLabel}scale=${Math.round(box.width)}:${Math.round(box.height)}:force_original_aspect_ratio=increase,crop=${Math.round(box.width)}:${Math.round(box.height)}:${cropX}:${cropY},setsar=1,format=rgba`,
-          Math.round(box.width),
-          Math.round(box.height),
-        );
-      }
-
+      const [unrotated] = unrotatedFilters(inputLabel, scaledOutput);
       return finish(
-        `${inputLabel}scale=${width}:${height}:force_original_aspect_ratio=decrease,setsar=1,format=rgba`,
-        width,
-        height,
+        unrotated.replace(`[${scaledOutput}]`, ""),
+        fit === "cover" ? Math.round(box.width) : width,
+        fit === "cover" ? Math.round(box.height) : height,
       );
     },
   };
@@ -2628,11 +2789,16 @@ async function createLayoutStudioTextOverlay({
     : desiredLineHeight;
   const maxWidth = Math.max(40, element.width - paddingX * 2 - textWrapPaddingX * 2);
   const maxHeight = Math.max(24, element.height - paddingY * 2 - textWrapPaddingY * 2);
-  const initialWrapped = wrapText(
+  const fontCandidates = fontCandidatesForStudioElement(element);
+  const initialWrapped = wrapStudioTextWithFontMetrics({
+    fontCandidates,
+    fontSize: desiredFontSize,
+    maxWidth,
+    outlineWidth,
     text,
-    charsPerLine(maxWidth, desiredFontSize),
-  );
+  });
   const fit = fitStudioTextForBox({
+    fontCandidates,
     lineHeight,
     maxHeight,
     maxWidth,
@@ -2659,7 +2825,7 @@ async function createLayoutStudioTextOverlay({
 
   return createTextOverlayImage({
     campaignId,
-    fontCandidates: fontCandidatesForStudioElement(element),
+    fontCandidates,
     fontSize: fit.fontSize,
     fontWeight: element.fontWeight ?? 700,
     height: Math.round(element.height + overlayPadding * 2),
@@ -3545,6 +3711,7 @@ function fitTextForBox(
 
 function fitStudioTextForBox({
   desiredFontSize,
+  fontCandidates,
   lineHeight,
   maxHeight,
   maxWidth,
@@ -3554,6 +3721,7 @@ function fitStudioTextForBox({
   wrappedText,
 }: {
   desiredFontSize: number;
+  fontCandidates: string[];
   lineHeight: number;
   maxHeight: number;
   maxWidth: number;
@@ -3565,11 +3733,17 @@ function fitStudioTextForBox({
   const normalized = normalizeTextForWrap(text);
 
   for (let fontSize = desiredFontSize; fontSize >= minFontSize; fontSize -= 1) {
-    const wrapped = wrapText(normalized, charsPerLine(maxWidth, fontSize));
+    const wrapped = wrapStudioTextWithFontMetrics({
+      fontCandidates,
+      fontSize,
+      maxWidth,
+      outlineWidth,
+      text: normalized,
+    });
     const lineCount = Math.max(1, wrapped.split("\n").length);
-    const estimatedHeight = lineCount * fontSize * lineHeight + outlineWidth * 2;
+    const estimatedHeight = lineCount * fontSize * lineHeight;
 
-    if (estimatedHeight <= maxHeight) {
+    if (estimatedHeight <= Math.max(1, maxHeight - outlineWidth * 2)) {
       return { fontSize, text: wrapped };
     }
   }
@@ -3578,6 +3752,84 @@ function fitStudioTextForBox({
     fontSize: minFontSize,
     text: wrappedText,
   };
+}
+
+function studioFontMetrics(fontCandidates: string[]) {
+  for (const filepath of fontCandidates) {
+    if (studioFontMetricsCache.has(filepath)) {
+      const cached = studioFontMetricsCache.get(filepath);
+      if (cached) return cached;
+      continue;
+    }
+
+    try {
+      const font = studioFontkit(fsSync.readFileSync(filepath));
+      studioFontMetricsCache.set(filepath, font);
+      return font;
+    } catch {
+      studioFontMetricsCache.set(filepath, null);
+    }
+  }
+
+  return null;
+}
+
+function studioTextWidth({
+  font,
+  fontSize,
+  text,
+}: {
+  font: StudioFontMetrics;
+  fontSize: number;
+  text: string;
+}) {
+  return (font.layout(text).advanceWidth / font.unitsPerEm) * fontSize;
+}
+
+export function wrapStudioTextWithFontMetrics({
+  fontCandidates,
+  fontSize,
+  maxWidth,
+  outlineWidth,
+  text,
+}: {
+  fontCandidates: string[];
+  fontSize: number;
+  maxWidth: number;
+  outlineWidth: number;
+  text: string;
+}) {
+  const font = studioFontMetrics(fontCandidates);
+  if (!font) {
+    return wrapText(text, charsPerLine(maxWidth, fontSize));
+  }
+
+  const availableWidth = Math.max(1, maxWidth - outlineWidth * 2);
+
+  return normalizeTextForWrap(text)
+    .split("\n")
+    .flatMap((paragraph) => {
+      const words = paragraph.split(/\s+/).filter(Boolean);
+      if (!words.length) return [""];
+
+      const lines: string[] = [];
+      let currentLine = words[0] ?? "";
+
+      for (let index = 1; index < words.length; index += 1) {
+        const word = words[index] ?? "";
+        const candidate = `${currentLine} ${word}`;
+        if (studioTextWidth({ font, fontSize, text: candidate }) <= availableWidth) {
+          currentLine = candidate;
+        } else {
+          lines.push(currentLine);
+          currentLine = word;
+        }
+      }
+
+      lines.push(currentLine);
+      return lines;
+    })
+    .join("\n");
 }
 
 function minimumWrappedLineHeight(fontSize: number, paddingY: number) {
@@ -3589,8 +3841,27 @@ function isLayoutStudioTextElement(element: LayoutStudioElement): element is Lay
 }
 
 function fontCandidatesForStudioElement(element: LayoutStudioElement) {
-  if (element.type === "hook") return hookFontCandidates();
-  return copyFontCandidates();
+  return studioFontCandidates(element.fontWeight ?? (element.type === "hook" ? 700 : 600));
+}
+
+function studioFontCandidates(fontWeight: number) {
+  const closestWeight = [300, 400, 500, 600, 700, 800, 900].reduce((closest, candidate) =>
+    Math.abs(candidate - fontWeight) < Math.abs(closest - fontWeight) ? candidate : closest,
+  600);
+  const fontByWeight: Record<number, string> = {
+    300: "TikTokSans-Light.ttf",
+    400: "TikTokSans-Regular.ttf",
+    500: "TikTokSans-Medium.ttf",
+    600: "TikTokSans-Semibold.ttf",
+    700: "TikTokSans-Bold.ttf",
+    800: "TikTokSans-ExtraBold.ttf",
+    900: "TikTokSans-Black.ttf",
+  };
+
+  return [
+    path.join(process.cwd(), "public", "fonts", fontByWeight[closestWeight] ?? "TikTokSans-Semibold.ttf"),
+    ...copyFontCandidates(),
+  ];
 }
 
 export function studioVideoTimelineDurationsForRender(
