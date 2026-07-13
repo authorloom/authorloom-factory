@@ -385,18 +385,65 @@ function sameRenderFilepath(left: string | null | undefined, right: string | nul
 async function runCommand(
   file: string,
   args: string[],
-  options: { all?: boolean; ignoreOutput?: boolean; maxBuffer?: number; timeoutMs?: number } = {},
+  options: {
+    all?: boolean;
+    ignoreOutput?: boolean;
+    maxBuffer?: number;
+    onStderrData?: (data: string) => void;
+    timeoutMs?: number;
+  } = {},
 ) {
   const { execa } = await import("execa");
-  const { ignoreOutput, timeoutMs, ...execaOptions } = options;
+  const { ignoreOutput, onStderrData, timeoutMs, ...execaOptions } = options;
 
-  return execa(file, args, {
+  const command = execa(file, args, {
     ...execaOptions,
     timeout: timeoutMs ?? ffmpegTimeoutMs,
     killSignal: "SIGKILL",
     maxBuffer: ignoreOutput ? undefined : options.maxBuffer ?? 1_000_000,
     ...(ignoreOutput ? { stdout: "ignore" as const, stderr: "ignore" as const } : {}),
   });
+  if (onStderrData) {
+    command.stderr?.on("data", (chunk: Buffer) => onStderrData(chunk.toString()));
+  }
+
+  return command;
+}
+
+function createFfmpegProgressLogger(jobId: string) {
+  let buffer = "";
+  let lastLoggedAt = 0;
+  const progress: Record<string, string> = {};
+  const snapshot = () => ({
+    frame: progress.frame ?? null,
+    outTimeMs: progress.out_time_ms ?? null,
+    speed: progress.speed ?? null,
+  });
+
+  return {
+    onStderrData(data: string) {
+      buffer += data;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const separator = line.indexOf("=");
+        if (separator < 1) continue;
+        const key = line.slice(0, separator);
+        progress[key] = line.slice(separator + 1);
+        if (key !== "progress") continue;
+        const now = Date.now();
+        if (progress[key] === "end" || now - lastLoggedAt >= 15_000) {
+          lastLoggedAt = now;
+          console.log("FFmpeg render progress:", {
+            jobId,
+            event: progress[key] === "end" ? "end" : "update",
+            ...snapshot(),
+          });
+        }
+      }
+    },
+    snapshot,
+  };
 }
 
 function getRandomRenderDurationSeconds() {
@@ -680,7 +727,7 @@ function pushMediaInput(
     args.push("-t", String(options.durationSeconds));
   }
   if (options.loopStillImage && isStillImageFile(filepath)) {
-    args.push("-f", "image2", "-loop", "1");
+    args.push("-f", "image2", "-framerate", String(outputFps), "-loop", "1");
   }
   args.push("-i", filepath);
 }
@@ -701,9 +748,19 @@ function finiteTimelineInputPrefix(
   const start = clampNumber(startSeconds, 0, 3600, 0);
   const duration = Math.max(0.01, endSeconds - start);
   const speed = clampNumber(playbackSpeed, 0.1, 10, 1);
-  const startOffset = start > 0.001 ? `+${start.toFixed(3)}/TB` : "";
+  const startPad = start > 0.001
+    ? `tpad=start_duration=${start.toFixed(3)}:start_mode=clone,`
+    : "";
 
-  return `${inputLabel}trim=start=0:duration=${duration.toFixed(3)},setpts=${(1 / speed).toFixed(5)}*(PTS-STARTPTS)${startOffset},`;
+  return `${inputLabel}trim=start=0:duration=${duration.toFixed(3)},setpts=${(1 / speed).toFixed(5)}*(PTS-STARTPTS),${startPad}trim=start=0:duration=${endSeconds.toFixed(3)},setpts=PTS-STARTPTS,`;
+}
+
+export function finiteLayoutStudioTimelineInputForRender(
+  inputLabel: string,
+  startSeconds: number,
+  endSeconds: number,
+) {
+  return finiteTimelineInputPrefix(inputLabel, startSeconds, endSeconds);
 }
 
 function finiteOverlayOptions(startSeconds: number, endSeconds: number) {
@@ -3980,7 +4037,16 @@ export async function renderJob(jobId: string) {
         })
     : null;
 
-  const args = ["-y", "-nostdin", "-hide_banner", "-nostats", "-loglevel", "fatal"];
+  const args = [
+    "-y",
+    "-nostdin",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-progress",
+    "pipe:2",
+    "-nostats",
+  ];
 
   if (
     !preparedBackground.temporary &&
@@ -4630,10 +4696,25 @@ export async function renderJob(jobId: string) {
       filterComplexThreads: filterComplexThreads ?? "auto",
     });
 
-    await runCommand(ffmpegBinary, args, {
-      all: true,
-      maxBuffer: 128_000_000,
-    });
+    const progressLogger = createFfmpegProgressLogger(job.id);
+    const renderStartedAt = Date.now();
+    const heartbeat = setInterval(() => {
+      console.log("FFmpeg render heartbeat:", {
+        jobId: job.id,
+        elapsedSeconds: Math.round((Date.now() - renderStartedAt) / 1000),
+        ...progressLogger.snapshot(),
+      });
+    }, 60_000);
+
+    try {
+      await runCommand(ffmpegBinary, args, {
+        all: true,
+        maxBuffer: 128_000_000,
+        onStderrData: progressLogger.onStderrData,
+      });
+    } finally {
+      clearInterval(heartbeat);
+    }
 
     const [outputStat, outputDuration] = await Promise.all([
       fs.stat(outputFilepath),

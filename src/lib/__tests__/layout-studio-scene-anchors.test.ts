@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  finiteLayoutStudioTimelineInputForRender,
   isLayoutStudioTimelineMediaOverlayLayer,
   layoutStudioCompositionDurationSeconds,
   layoutStudioElementTimelineWindows,
@@ -10,6 +11,15 @@ import {
   resolveLayoutStudioSceneTextElementForRender,
   studioVideoTimelineDurationsForRender,
 } from "../ffmpeg";
+
+test("delayed Layout Studio inputs use finite continuous timestamps", () => {
+  const filter = finiteLayoutStudioTimelineInputForRender("[4:v]", 5, 7);
+
+  assert.doesNotMatch(filter, /\+5(?:\.0+)?\/TB/);
+  assert.match(filter, /trim=start=0:duration=2\.000/);
+  assert.match(filter, /tpad=start_duration=5\.000:start_mode=clone/);
+  assert.match(filter, /trim=start=0:duration=7\.000/);
+});
 
 const screenshotElement = {
   id: "screenshot-1",
