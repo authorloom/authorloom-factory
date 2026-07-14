@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import path from "node:path";
 
 import {
+  buildLayoutStudioFilterComplexForRender,
   isLayoutStudioTimelineMediaOverlayLayer,
   layoutStudioCompositionDurationSeconds,
   layoutStudioElementTimelineWindows,
+  layoutStudioFiniteOverlayClipFilterForRender,
   primaryLayoutStudioScreenshotElementKey,
   resolveLayoutStudioElementsForRender,
   resolveLayoutStudioSceneTextElementForRender,
   studioVideoTimelineDurationsForRender,
+  wrapStudioTextWithFontMetrics,
 } from "../ffmpeg";
 
 const screenshotElement = {
@@ -143,6 +147,35 @@ test("Layout Studio composition duration overrides stale fixed production durati
   );
 });
 
+test("Layout Studio finite overlay helper pads delayed branches without sparse timestamps", () => {
+  assert.equal(
+    layoutStudioFiniteOverlayClipFilterForRender({
+      inputLabel: "[1:v]",
+      outputLabel: "shot_finite",
+      startSeconds: 6,
+      endSeconds: 8,
+    }),
+    "[1:v]trim=start=0:duration=2,setpts=PTS-STARTPTS,tpad=start_duration=6:start_mode=clone,trim=start=0:duration=8,setpts=PTS-STARTPTS[shot_finite]",
+  );
+});
+
+test("Layout Studio text wrapping uses the selected TikTok font metrics", () => {
+  const wrapped = wrapStudioTextWithFontMetrics({
+    fontCandidates: [
+      path.join(process.cwd(), "public", "fonts", "TikTokSans-ExtraBold.ttf"),
+    ],
+    fontSize: 50,
+    maxWidth: 830,
+    outlineWidth: 3,
+    text: "Turn book quotes, scenes and excerpts into posts that feel made for BookTok and Bookstagram.",
+  });
+
+  assert.equal(
+    wrapped,
+    "Turn book quotes, scenes and\nexcerpts into posts that feel\nmade for BookTok and\nBookstagram.",
+  );
+});
+
 test("Layout Studio screenshot timeline clips do not become duplicate media overlays", () => {
   assert.equal(isLayoutStudioTimelineMediaOverlayLayer("screenshot"), false);
   assert.equal(isLayoutStudioTimelineMediaOverlayLayer("image"), true);
@@ -172,7 +205,147 @@ test("Layout Studio screenshot timeline clips create direct screenshot enable wi
     },
   });
 
-  assert.deepEqual(windows.get("screenshot-1"), [{ startSeconds: 0, endSeconds: 6 }]);
+  assert.deepEqual(windows.get("screenshot-1"), [
+    {
+      clipId: "screenshot-clip",
+      endSeconds: 6,
+      layerType: "screenshot",
+      startSeconds: 0,
+    },
+  ]);
+});
+
+test("Layout Studio generated graph makes screenshot, text, and image branches finite", () => {
+  const imageElement = {
+    id: "image-1",
+    type: "image",
+    x: 120,
+    y: 1000,
+    width: 300,
+    height: 300,
+    fit: "contain" as const,
+    backgroundColor: "#ffffff",
+    backgroundOpacity: 100,
+    borderColor: "#111111",
+    borderRadius: 24,
+    borderWidth: 3,
+    containerOutline: true,
+    rotation: 12,
+  };
+  const ctaElement = {
+    id: "cta-1",
+    type: "cta",
+    x: 120,
+    y: 1420,
+    width: 840,
+    height: 120,
+  };
+  const studioTemplate = {
+    ...template,
+    scenes: [
+      {
+        id: "scene-1",
+        elements: [screenshotElement, imageElement, ctaElement],
+      },
+    ],
+    compositionTimeline: {
+      durationSeconds: 8,
+      clips: [
+        {
+          id: "screenshot-clip",
+          elementId: "screenshot-1",
+          layerType: "screenshot",
+          startSeconds: 0,
+          durationSeconds: 6,
+        },
+        {
+          id: "image-clip",
+          elementId: "image-1",
+          layerType: "image",
+          startSeconds: 6,
+          durationSeconds: 2,
+        },
+        {
+          id: "cta-clip",
+          elementId: "cta-1",
+          layerType: "cta",
+          startSeconds: 6,
+          durationSeconds: 2,
+        },
+      ],
+    },
+  };
+  const resolvedElements = resolveLayoutStudioElementsForRender({
+    template: studioTemplate,
+    screenshotDimensions: { width: 926, height: 561 },
+  });
+  const image = resolvedElements.find((element) => element.id === "image-1");
+  const cta = resolvedElements.find((element) => element.id === "cta-1");
+
+  assert.ok(image);
+  assert.ok(cta);
+
+  const graph = buildLayoutStudioFilterComplexForRender({
+    baseFilters: ["[0:v]null[bg]"],
+    outputLabel: "vcomposed",
+    screenshotDimensions: { width: 926, height: 561 },
+    studioTemplate,
+    studioMediaOverlays: [
+      {
+        element: image,
+        inputIndex: 2,
+        width: 600,
+        height: 600,
+        startSeconds: 6,
+        endSeconds: 8,
+      },
+    ],
+    studioTextOverlays: [
+      {
+        element: cta,
+        inputIndex: 3,
+        width: 500,
+        height: 120,
+        startSeconds: 6,
+        endSeconds: 8,
+      },
+    ],
+    resolvedElements,
+    studioElementTimelineWindows: layoutStudioElementTimelineWindows(
+      studioTemplate,
+      resolvedElements,
+    ),
+    studioTimeline: {
+      mainStartSeconds: 0,
+      mainEndSeconds: 8,
+    },
+  });
+
+  assert.match(
+    graph,
+    /\[1:v\]trim=start=0:duration=6,setpts=PTS-STARTPTS\[studio_shot_0_finite\]/,
+  );
+  assert.match(
+    graph,
+    /\[2:v\]trim=start=0:duration=2,setpts=PTS-STARTPTS,tpad=start_duration=6:start_mode=clone,trim=start=0:duration=8,setpts=PTS-STARTPTS\[studio_shot_1_finite\]/,
+  );
+  assert.match(
+    graph,
+    /\[3:v\]trim=start=0:duration=2,setpts=PTS-STARTPTS,tpad=start_duration=6:start_mode=clone,trim=start=0:duration=8,setpts=PTS-STARTPTS\[studio_text_0_finite\]/,
+  );
+  assert.doesNotMatch(graph, /setpts=PTS-STARTPTS\+\d+\/TB/);
+  assert.match(graph, /overlay=.*enable='gte\(t,0\)\*lt\(t,6\)'/);
+  assert.match(graph, /overlay=.*enable='gte\(t,6\)\*lt\(t,8\)'/);
+  assert.match(graph, /overlay=.*eof_action=pass:repeatlast=0/);
+  assert.doesNotMatch(graph, /eof_action=pass\[/);
+  assert.match(graph, /color=c=0xffffff@1.000:s=600x600/);
+  assert.match(graph, /color=c=0x111111@1.000:s=600x600/);
+  assert.match(graph, /overlay=x=0:y=0:format=auto\[studio_shot_1_bordered\]/);
+  assert.match(graph, /scale=iw\*2:ih\*2:flags=lanczos\[studio_shot_1_media_scaled\]/);
+  assert.match(graph, /scale=425:425:flags=lanczos\[studio_shot_1\]/);
+  assert.doesNotMatch(graph, /drawbox=/);
+  assert.match(graph, /geq=r='r\(X\\,Y\)'/);
+  assert.match(graph, /rotate=0.20943951:c=none/);
 });
 
 test("Layout Studio duplicate screenshot elements use the top-most slot", () => {

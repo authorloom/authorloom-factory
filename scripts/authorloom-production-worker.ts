@@ -28,6 +28,7 @@ import { env } from "../src/lib/env";
 import { getGoogleServiceAccountAuth } from "../src/lib/google-auth";
 import { paths } from "../src/lib/paths";
 import { slugifyCampaignName, slugifyName } from "../src/lib/slugs";
+import { preferredWorkerMediaId } from "../src/lib/worker-media-source";
 
 const api = anyApi;
 type Id<TableName extends string> = string & { __tableName?: TableName };
@@ -900,8 +901,13 @@ async function ensureSourceFileDownloaded(input: {
   }
 
   await fs.mkdir(input.directory, { recursive: true });
+  const requestedFilename = input.filename ?? mediaSource?.filename ?? input.fallbackFilename;
+  const mediaExtension =
+    path.extname(mediaSource?.objectName ?? "") || path.extname(mediaSource?.filename ?? "");
   const filename = safeFilename(
-    input.filename ?? mediaSource?.filename,
+    input.filename && mediaExtension
+      ? `${path.basename(input.filename, path.extname(input.filename))}${mediaExtension}`
+      : requestedFilename,
     input.fallbackFilename,
   );
   const filepath = path.join(input.directory, filename);
@@ -1007,23 +1013,7 @@ async function downloadDriveFileToPath(fileId: string, filepath: string) {
 }
 
 function mediaIdForAsset(asset: RenderAssetRef) {
-  if (asset.type === "background") {
-    return (
-      asset.renderSourceMediaId ??
-      asset.sourceMediaId ??
-      asset.previewMediaId ??
-      asset.thumbnailMediaId ??
-      null
-    );
-  }
-
-  return (
-    asset.renderSourceMediaId ??
-    asset.sourceMediaId ??
-    asset.previewMediaId ??
-    asset.thumbnailMediaId ??
-    null
-  );
+  return preferredWorkerMediaId(asset);
 }
 
 async function resolveMediaSource(asset: RenderAssetRef) {
@@ -2274,6 +2264,7 @@ async function handleRenderTask(
   }
 
   const idempotencyKey = body.idempotencyKey?.trim();
+  const productionJobId = body.productionJobId?.trim();
 
   if (!idempotencyKey) {
     response.writeHead(400, { "content-type": "application/json" });
@@ -2295,6 +2286,7 @@ async function handleRenderTask(
     workerSecret: requiredWorkerSecret,
     types: ["render_campaign_videos"],
     idempotencyKey,
+    ...(productionJobId ? { productionJobId: productionJobId as Id<"productionJobs"> } : {}),
   });
   const claimResult = claim as {
     success: boolean;
@@ -2308,7 +2300,7 @@ async function handleRenderTask(
 
   if (!claimResult.job) {
     console.log(
-      `No queued matching render job for Cloud Task ${body.productionJobId ?? idempotencyKey}; treating as already handled.`,
+      `No queued matching render job for Cloud Task ${productionJobId ?? idempotencyKey}; treating as already handled.`,
     );
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ ok: true, claimed: false }));
