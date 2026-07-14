@@ -3780,6 +3780,8 @@ export async function renderJob(jobId: string) {
   ].join(";");
 
   args.push(
+    "-filter_complex_threads",
+    "1",
     "-filter_complex",
     filterComplex,
     "-t",
