@@ -1472,7 +1472,7 @@ function upsertRenderJob(input: {
           ON campaigns.id = render_jobs.campaign_id
         WHERE campaigns.book_id = ?
           AND render_jobs.creative_signature = ?
-          AND render_jobs.status IN ('pending', 'running', 'done', 'failed')
+          AND render_jobs.status IN ('pending', 'running', 'done')
           AND render_jobs.id != ?
         LIMIT 1
       `,
