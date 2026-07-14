@@ -24,6 +24,8 @@ const outputFps = 30;
 const outputVideoBitrate = "10M";
 const outputVideoMaxrate = "12M";
 const outputVideoBufsize = "20M";
+const outputVideoPreset =
+  process.env.AUTHORLOOM_FFMPEG_VIDEO_PRESET?.trim() || "veryfast";
 const outputAudioBitrate = "192k";
 const outputAudioSampleRate = "48000";
 const outputColorSpace = "bt709";
@@ -510,6 +512,20 @@ async function fileExists(filepath: string | null) {
     .access(filepath)
     .then(() => true)
     .catch(() => false);
+}
+
+function normalizedRenderFilepath(filepath: string | null | undefined) {
+  return filepath ? path.resolve(filepath).normalize() : null;
+}
+
+function sameRenderFilepath(
+  left: string | null | undefined,
+  right: string | null | undefined,
+) {
+  const normalizedLeft = normalizedRenderFilepath(left);
+  const normalizedRight = normalizedRenderFilepath(right);
+
+  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
 }
 
 function isHeicFile(filepath: string) {
@@ -3519,6 +3535,13 @@ export async function renderJob(jobId: string) {
       if (layerType === "background") {
         const filepath = resolved?.asset?.filepath ?? null;
         if (!filepath || !(await fileExists(filepath))) continue;
+        if (sameRenderFilepath(filepath, job.background_filepath)) {
+          console.log("Skipping duplicate Studio background overlay input", {
+            jobId: job.id,
+            filepath,
+          });
+          continue;
+        }
 
         pushMediaInput(args, filepath, {
           loop: true,
@@ -3712,7 +3735,7 @@ export async function renderJob(jobId: string) {
     "-c:v",
     "libx264",
     "-preset",
-    "medium",
+    outputVideoPreset,
     "-profile:v",
     "high",
     "-level:v",
