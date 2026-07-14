@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import path from "node:path";
 
 import {
+  finiteLayoutStudioTimelineInputForRender,
   isLayoutStudioTimelineMediaOverlayLayer,
   layoutStudioCompositionDurationSeconds,
   layoutStudioElementTimelineWindows,
@@ -9,7 +11,17 @@ import {
   resolveLayoutStudioElementsForRender,
   resolveLayoutStudioSceneTextElementForRender,
   studioVideoTimelineDurationsForRender,
+  wrapStudioTextWithFontMetrics,
 } from "../ffmpeg";
+
+test("delayed Layout Studio inputs use finite continuous timestamps", () => {
+  const filter = finiteLayoutStudioTimelineInputForRender("[4:v]", 5, 7);
+
+  assert.doesNotMatch(filter, /\+5(?:\.0+)?\/TB/);
+  assert.match(filter, /trim=start=0:duration=2\.000/);
+  assert.match(filter, /tpad=start_duration=5\.000:start_mode=clone/);
+  assert.match(filter, /trim=start=0:duration=7\.000/);
+});
 
 const screenshotElement = {
   id: "screenshot-1",
@@ -140,6 +152,23 @@ test("Layout Studio composition duration overrides stale fixed production durati
       {},
     ).mainDuration,
     8,
+  );
+});
+
+test("Layout Studio text wrapping uses the selected TikTok font metrics", () => {
+  const wrapped = wrapStudioTextWithFontMetrics({
+    fontCandidates: [
+      path.join(process.cwd(), "public", "fonts", "TikTokSans-ExtraBold.ttf"),
+    ],
+    fontSize: 50,
+    maxWidth: 830,
+    outlineWidth: 3,
+    text: "Turn book quotes, scenes and excerpts into posts that feel made for BookTok and Bookstagram.",
+  });
+
+  assert.equal(
+    wrapped,
+    "Turn book quotes, scenes and\nexcerpts into posts that feel\nmade for BookTok and\nBookstagram.",
   );
 });
 

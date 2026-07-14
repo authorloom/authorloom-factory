@@ -103,6 +103,7 @@ const presetTextShadow =
         ? hookTextShadow
         : undefined;
 const textShadow = config.textShadow ?? presetTextShadow;
+const renderedLineHeight = Math.max(1, Math.round(fontSize * lineHeight));
 
 const emojiShadow = "0 1px 3px rgba(0,0,0,0.16)";
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -274,6 +275,7 @@ function renderLine(line, lineIndex) {
         alignItems: "center",
         display: "flex",
         flexDirection: "row",
+        height: config.textWrap ? renderedLineHeight : undefined,
         justifyContent: lineJustifyContent,
         lineHeight,
         width: "100%",
@@ -307,6 +309,7 @@ const imageStream = await unstable_createNodejsStream(
           background: config.backgroundColor ?? "transparent",
           border: config.border ? config.border : undefined,
           borderRadius: Number(config.borderRadius ?? 0),
+          boxSizing: "border-box",
           boxShadow: config.containerShadow,
           color: textColor,
           display: "flex",

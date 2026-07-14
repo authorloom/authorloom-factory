@@ -1,6 +1,8 @@
 import type { ExecaError } from "execa";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import studioFontkitModule from "next/dist/compiled/@next/font/dist/fontkit";
 
 import {
   getRenderJobDetails,
@@ -19,7 +21,9 @@ const ffmpegTimeoutMs = Math.max(
 
 const canvasWidth = 1080;
 const canvasHeight = 1920;
-const layoutStudioTypographyScale = 1;
+// Satori rasterizes the same TTF fractionally wider than Chromium's Studio preview.
+// This compensation keeps rendered text size and wrapping aligned with the editor.
+const layoutStudioTypographyScale = 0.96;
 const outputFps = 30;
 const outputVideoBitrate = "10M";
 const outputVideoMaxrate = "12M";
@@ -52,6 +56,16 @@ const minScreenshotWidth = 440;
 const hookScreenshotGap = 8;
 const defaultHookYOffset = 156;
 const defaultLayoutVerticalNudge = -160;
+
+type StudioFontMetrics = {
+  unitsPerEm: number;
+  layout: (text: string) => { advanceWidth: number };
+};
+
+type StudioFontkit = (fontData: Buffer) => StudioFontMetrics;
+
+const studioFontkit = studioFontkitModule as StudioFontkit;
+const studioFontMetricsCache = new Map<string, StudioFontMetrics | null>();
 
 type HookOverlayResult = {
   filepath: string;
@@ -385,18 +399,65 @@ function sameRenderFilepath(left: string | null | undefined, right: string | nul
 async function runCommand(
   file: string,
   args: string[],
-  options: { all?: boolean; ignoreOutput?: boolean; maxBuffer?: number; timeoutMs?: number } = {},
+  options: {
+    all?: boolean;
+    ignoreOutput?: boolean;
+    maxBuffer?: number;
+    onStderrData?: (data: string) => void;
+    timeoutMs?: number;
+  } = {},
 ) {
   const { execa } = await import("execa");
-  const { ignoreOutput, timeoutMs, ...execaOptions } = options;
+  const { ignoreOutput, onStderrData, timeoutMs, ...execaOptions } = options;
 
-  return execa(file, args, {
+  const command = execa(file, args, {
     ...execaOptions,
     timeout: timeoutMs ?? ffmpegTimeoutMs,
     killSignal: "SIGKILL",
     maxBuffer: ignoreOutput ? undefined : options.maxBuffer ?? 1_000_000,
     ...(ignoreOutput ? { stdout: "ignore" as const, stderr: "ignore" as const } : {}),
   });
+  if (onStderrData) {
+    command.stderr?.on("data", (chunk: Buffer) => onStderrData(chunk.toString()));
+  }
+
+  return command;
+}
+
+function createFfmpegProgressLogger(jobId: string) {
+  let buffer = "";
+  let lastLoggedAt = 0;
+  const progress: Record<string, string> = {};
+  const snapshot = () => ({
+    frame: progress.frame ?? null,
+    outTimeMs: progress.out_time_ms ?? null,
+    speed: progress.speed ?? null,
+  });
+
+  return {
+    onStderrData(data: string) {
+      buffer += data;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const separator = line.indexOf("=");
+        if (separator < 1) continue;
+        const key = line.slice(0, separator);
+        progress[key] = line.slice(separator + 1);
+        if (key !== "progress") continue;
+        const now = Date.now();
+        if (progress[key] === "end" || now - lastLoggedAt >= 15_000) {
+          lastLoggedAt = now;
+          console.log("FFmpeg render progress:", {
+            jobId,
+            event: progress[key] === "end" ? "end" : "update",
+            ...snapshot(),
+          });
+        }
+      }
+    },
+    snapshot,
+  };
 }
 
 function getRandomRenderDurationSeconds() {
@@ -414,8 +475,12 @@ function commandErrorMessage(error: unknown) {
         : [execaError.stdout, execaError.stderr]
             .filter((value): value is string => typeof value === "string")
             .join("\n");
+    const trimmedOutput =
+      output.length > 20_000
+        ? `${output.slice(0, 4_000)}\n\n...[truncated ${output.length - 20_000} chars]...\n\n${output.slice(-16_000)}`
+        : output;
 
-    return [error.message, output ? `Output:\n${output}` : null]
+    return [error.message, trimmedOutput ? `Output:\n${trimmedOutput}` : null]
       .filter(Boolean)
       .join("\n");
   }
@@ -676,7 +741,7 @@ function pushMediaInput(
     args.push("-t", String(options.durationSeconds));
   }
   if (options.loopStillImage && isStillImageFile(filepath)) {
-    args.push("-f", "image2", "-loop", "1");
+    args.push("-f", "image2", "-framerate", String(outputFps), "-loop", "1");
   }
   args.push("-i", filepath);
 }
@@ -686,6 +751,34 @@ function pushFilterComplexInput(args: string[], filterComplex: string) {
     args.push("-filter_complex_threads", filterComplexThreads);
   }
   args.push("-filter_complex", filterComplex);
+}
+
+function finiteTimelineInputPrefix(
+  inputLabel: string,
+  startSeconds: number,
+  endSeconds: number,
+  playbackSpeed = 1,
+) {
+  const start = clampNumber(startSeconds, 0, 3600, 0);
+  const duration = Math.max(0.01, endSeconds - start);
+  const speed = clampNumber(playbackSpeed, 0.1, 10, 1);
+  const startPad = start > 0.001
+    ? `tpad=start_duration=${start.toFixed(3)}:start_mode=clone,`
+    : "";
+
+  return `${inputLabel}trim=start=0:duration=${duration.toFixed(3)},setpts=${(1 / speed).toFixed(5)}*(PTS-STARTPTS),${startPad}trim=start=0:duration=${endSeconds.toFixed(3)},setpts=PTS-STARTPTS,`;
+}
+
+export function finiteLayoutStudioTimelineInputForRender(
+  inputLabel: string,
+  startSeconds: number,
+  endSeconds: number,
+) {
+  return finiteTimelineInputPrefix(inputLabel, startSeconds, endSeconds);
+}
+
+function finiteOverlayOptions(startSeconds: number, endSeconds: number) {
+  return `${ffmpegEnableWindow(startSeconds, endSeconds)}:eof_action=pass:repeatlast=0`;
 }
 
 async function prepareBackgroundVideoForRender({
@@ -1285,8 +1378,8 @@ function buildImageTextFilterComplex({
     const label = `studio_bg_${index}`;
     const afterLabel = `studio_bg_after_${index}`;
     baseFilters.push(
-      `[${overlay.inputIndex}:v]setpts=${(1 / playbackSpeed).toFixed(5)}*PTS,${backgroundScaleFilter},crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY},setsar=1,format=yuv420p[${label}]`,
-      `[${backgroundLabel}][${label}]overlay=x=0:y=0:enable='between(t,${overlay.startSeconds},${overlay.endSeconds})':eof_action=pass[${afterLabel}]`,
+      `${finiteTimelineInputPrefix(`[${overlay.inputIndex}:v]`, overlay.startSeconds, overlay.endSeconds, playbackSpeed)}${backgroundScaleFilter},crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY},setsar=1,format=yuv420p[${label}]`,
+      `[${backgroundLabel}][${label}]overlay=x=0:y=0${finiteOverlayOptions(overlay.startSeconds, overlay.endSeconds)}[${afterLabel}]`,
     );
     backgroundLabel = afterLabel;
   });
@@ -1518,14 +1611,28 @@ function buildLayoutStudioFilterComplex({
       const timelineOverlays = mediaOverlaysByElementId.get(studioElementKey(element)) ?? [];
       if (timelineOverlays.length > 0) {
         for (const overlay of timelineOverlays) {
+          const hasContainer = studioMediaHasContainer(element);
           const media = fitMediaIntoStudioElement(element, {
             width: overlay.width,
             height: overlay.height,
-          });
-          const enable = ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds);
+          }, { rotateContainer: hasContainer });
+          const inputPrefix = finiteTimelineInputPrefix(
+            `[${overlay.inputIndex}:v]`,
+            overlay.startSeconds,
+            overlay.endSeconds,
+          );
           filters.push(
-            ...media.filters(`[${overlay.inputIndex}:v]`, `studio_shot_${mediaIndex}`),
-            `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${enable}:eof_action=pass[studio_after_${mediaIndex}]`,
+            ...(hasContainer
+              ? studioMediaPanelFilters({
+                  element,
+                  inputLabel: inputPrefix,
+                  media,
+                  outputLabel: `studio_shot_${mediaIndex}`,
+                  startSeconds: overlay.startSeconds,
+                  endSeconds: overlay.endSeconds,
+                })
+              : media.filters(inputPrefix, `studio_shot_${mediaIndex}`)),
+            `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, hasContainer ? element.x : media.x)}:y=${studioOverlayY(element, hasContainer ? element.y : media.y)}${finiteOverlayOptions(overlay.startSeconds, overlay.endSeconds)}[studio_after_${mediaIndex}]`,
           );
           currentLabel = `studio_after_${mediaIndex}`;
           mediaIndex += 1;
@@ -1534,14 +1641,32 @@ function buildLayoutStudioFilterComplex({
       }
 
       if (elementType === "cover" && coverOverlay) {
+        const hasContainer = studioMediaHasContainer(element) && Boolean(studioTimeline);
         const media = fitMediaIntoStudioElement(
           element,
           { width: coverOverlay.width, height: coverOverlay.height },
+          { rotateContainer: hasContainer },
         );
         const enable = elementEnable(element);
+        const inputPrefix = studioTimeline
+          ? finiteTimelineInputPrefix(
+              `[${coverOverlay.inputIndex}:v]`,
+              studioTimeline.mainStartSeconds,
+              studioTimeline.mainEndSeconds,
+            )
+          : `[${coverOverlay.inputIndex}:v]`;
         filters.push(
-          ...media.filters(`[${coverOverlay.inputIndex}:v]`, `studio_cover_${mediaIndex}`),
-          `[${currentLabel}][studio_cover_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${enable}:eof_action=pass[studio_after_${mediaIndex}]`,
+          ...(hasContainer && studioTimeline
+            ? studioMediaPanelFilters({
+                element,
+                inputLabel: inputPrefix,
+                media,
+                outputLabel: `studio_cover_${mediaIndex}`,
+                startSeconds: studioTimeline.mainStartSeconds,
+                endSeconds: studioTimeline.mainEndSeconds,
+              })
+            : media.filters(inputPrefix, `studio_cover_${mediaIndex}`)),
+          `[${currentLabel}][studio_cover_${mediaIndex}]overlay=x=${studioOverlayX(element, hasContainer ? element.x : media.x)}:y=${studioOverlayY(element, hasContainer ? element.y : media.y)}${enable}:eof_action=pass:repeatlast=0[studio_after_${mediaIndex}]`,
         );
         currentLabel = `studio_after_${mediaIndex}`;
         mediaIndex += 1;
@@ -1555,11 +1680,30 @@ function buildLayoutStudioFilterComplex({
         continue;
       }
 
-      const media = fitMediaIntoStudioElement(element, screenshotDimensions);
+      const hasContainer = studioMediaHasContainer(element) && Boolean(studioTimeline);
+      const media = fitMediaIntoStudioElement(element, screenshotDimensions, {
+        rotateContainer: hasContainer,
+      });
       const enable = elementEnable(element);
+      const inputPrefix = studioTimeline
+        ? finiteTimelineInputPrefix(
+            "[1:v]",
+            studioTimeline.mainStartSeconds,
+            studioTimeline.mainEndSeconds,
+          )
+        : "[1:v]";
       filters.push(
-        ...media.filters("[1:v]", `studio_shot_${mediaIndex}`),
-        `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, media.x)}:y=${studioOverlayY(element, media.y)}${enable}:eof_action=pass[studio_after_${mediaIndex}]`,
+        ...(hasContainer && studioTimeline
+          ? studioMediaPanelFilters({
+              element,
+              inputLabel: inputPrefix,
+              media,
+              outputLabel: `studio_shot_${mediaIndex}`,
+              startSeconds: studioTimeline.mainStartSeconds,
+              endSeconds: studioTimeline.mainEndSeconds,
+            })
+          : media.filters(inputPrefix, `studio_shot_${mediaIndex}`)),
+        `[${currentLabel}][studio_shot_${mediaIndex}]overlay=x=${studioOverlayX(element, hasContainer ? element.x : media.x)}:y=${studioOverlayY(element, hasContainer ? element.y : media.y)}${enable}:eof_action=pass:repeatlast=0[studio_after_${mediaIndex}]`,
       );
       currentLabel = `studio_after_${mediaIndex}`;
       mediaIndex += 1;
@@ -1576,13 +1720,21 @@ function buildLayoutStudioFilterComplex({
           typeof overlay.startSeconds === "number" && typeof overlay.endSeconds === "number"
             ? ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds)
             : mainEnable;
+        const inputPrefix =
+          typeof overlay.startSeconds === "number" && typeof overlay.endSeconds === "number"
+            ? finiteTimelineInputPrefix(
+                `[${overlay.inputIndex}:v]`,
+                overlay.startSeconds,
+                overlay.endSeconds,
+              )
+            : `[${overlay.inputIndex}:v]`;
         filters.push(
           ...studioOverlayInputFilters(
-            `[${overlay.inputIndex}:v]`,
+            inputPrefix,
             `studio_text_${textIndex}`,
             element,
           ),
-          `[${currentLabel}][studio_text_${textIndex}]overlay=x=${studioCenteredOverlayX(element)}:y=${studioCenteredOverlayY(element)}${enable}:eof_action=pass[studio_text_after_${textIndex}]`,
+          `[${currentLabel}][studio_text_${textIndex}]overlay=x=${studioCenteredOverlayX(element)}:y=${studioCenteredOverlayY(element)}${enable}:eof_action=pass:repeatlast=0[studio_text_after_${textIndex}]`,
         );
         currentLabel = `studio_text_after_${textIndex}`;
         textIndex += 1;
@@ -1598,8 +1750,8 @@ function buildLayoutStudioFilterComplex({
     const label = `studio_${key}_timeline`;
     const afterLabel = `studio_${key}_after`;
     filters.push(
-      `[${overlay.inputIndex}:v]scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight}:(iw-ow)/2:(ih-oh)/2,setsar=1,format=rgba[${label}]`,
-      `[${currentLabel}][${label}]overlay=x=0:y=0${ffmpegEnableWindow(overlay.startSeconds, overlay.endSeconds)}[${afterLabel}]`,
+      `${finiteTimelineInputPrefix(`[${overlay.inputIndex}:v]`, overlay.startSeconds, overlay.endSeconds)}scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight}:(iw-ow)/2:(ih-oh)/2,setsar=1,format=rgba[${label}]`,
+      `[${currentLabel}][${label}]overlay=x=0:y=0${finiteOverlayOptions(overlay.startSeconds, overlay.endSeconds)}[${afterLabel}]`,
     );
     currentLabel = afterLabel;
   }
@@ -1626,6 +1778,117 @@ function studioOverlayInputFilters(
     `${inputLabel}format=rgba[${formatted}]`,
     `[${formatted}]rotate=${rotation}:c=none:ow=rotw(iw):oh=roth(ih)[${outputLabel}]`,
   ];
+}
+
+function studioMediaHasContainer(element: LayoutStudioResolvedElement) {
+  return (
+    clampNumber(element.backgroundOpacity, 0, 100, 0) > 0 ||
+    (Boolean(element.containerOutline) && clampNumber(element.borderWidth, 0, 200, 0) > 0)
+  );
+}
+
+function ffmpegPanelColor(color: string | undefined, opacity: number) {
+  const value = color?.trim().replace(/^#/, "") ?? "";
+  const hex = /^[0-9a-fA-F]{6}$/.test(value)
+    ? value
+    : /^[0-9a-fA-F]{3}$/.test(value)
+      ? value.split("").map((channel) => `${channel}${channel}`).join("")
+      : "000000";
+  return `0x${hex}@${(clampNumber(opacity, 0, 100, 0) / 100).toFixed(3)}`;
+}
+
+function studioMediaPanelFilters({
+  element,
+  inputLabel,
+  media,
+  outputLabel,
+  startSeconds,
+  endSeconds,
+}: {
+  element: LayoutStudioResolvedElement;
+  inputLabel: string;
+  media: ReturnType<typeof fitMediaIntoStudioElement>;
+  outputLabel: string;
+  startSeconds: number;
+  endSeconds: number;
+}) {
+  const clipStartSeconds = clampNumber(startSeconds, 0, 3600, 0);
+  const clipEndSeconds = Math.max(
+    clipStartSeconds + 0.01,
+    clampNumber(endSeconds, 0.01, 3600, clipStartSeconds + 0.01),
+  );
+  const clipDurationSeconds = clipEndSeconds - clipStartSeconds;
+  const width = Math.max(1, Math.round(element.width));
+  const height = Math.max(1, Math.round(element.height));
+  const borderWidth = element.containerOutline
+    ? Math.round(clampNumber(element.borderWidth, 0, Math.min(width, height) / 2, 0))
+    : 0;
+  const radius = Math.round(clampNumber(element.borderRadius, 0, Math.min(width, height) / 2, 0));
+  const panelScale = radius > 0 || borderWidth > 0 ? 2 : 1;
+  const panelWidth = width * panelScale;
+  const panelHeight = height * panelScale;
+  const panelBorderWidth = borderWidth * panelScale;
+  const panelRadius = radius * panelScale;
+  const panelLabel = `${outputLabel}_panel`;
+  const mediaLabel = `${outputLabel}_media`;
+  const scaledMediaLabel = `${outputLabel}_media_scaled`;
+  const composedLabel = `${outputLabel}_composed`;
+  const borderRingBaseLabel = `${outputLabel}_border_ring_base`;
+  const borderRingLabel = `${outputLabel}_border_ring`;
+  const maskedLabel = `${outputLabel}_masked`;
+  const panelTiming = `format=rgba,setpts=PTS-STARTPTS${clipStartSeconds > 0 ? `,tpad=start_duration=${clipStartSeconds}:start_mode=clone,trim=start=0:duration=${clipEndSeconds},setpts=PTS-STARTPTS` : ""}`;
+  const outerRoundedExpression = `lte((X-clip(X\\,${panelRadius}\\,${panelWidth - panelRadius}))^2+(Y-clip(Y\\,${panelRadius}\\,${panelHeight - panelRadius}))^2\\,${panelRadius * panelRadius})`;
+  const innerRadius = Math.max(0, panelRadius - panelBorderWidth);
+  const innerRoundedExpression = innerRadius > 0
+    ? `lte((X-clip(X\\,${panelBorderWidth + innerRadius}\\,${panelWidth - panelBorderWidth - innerRadius}))^2+(Y-clip(Y\\,${panelBorderWidth + innerRadius}\\,${panelHeight - panelBorderWidth - innerRadius}))^2\\,${innerRadius * innerRadius})`
+    : `between(X\\,${panelBorderWidth}\\,${panelWidth - panelBorderWidth})*between(Y\\,${panelBorderWidth}\\,${panelHeight - panelBorderWidth})`;
+  const filters = [
+    `color=c=${ffmpegPanelColor(element.backgroundColor, element.backgroundOpacity ?? 0)}:s=${panelWidth}x${panelHeight}:r=${outputFps}:d=${clipDurationSeconds},${panelTiming}[${panelLabel}]`,
+    ...media.unrotatedFilters(inputLabel, mediaLabel),
+    ...(panelScale > 1 ? [`[${mediaLabel}]scale=iw*${panelScale}:ih*${panelScale}:flags=lanczos[${scaledMediaLabel}]`] : []),
+    `[${panelLabel}][${panelScale > 1 ? scaledMediaLabel : mediaLabel}]overlay=x=${Math.round((media.x - element.x) * panelScale)}:y=${Math.round((media.y - element.y) * panelScale)}:format=auto[${composedLabel}]`,
+  ];
+  let currentLabel = composedLabel;
+
+  if (borderWidth > 0) {
+    const borderedLabel = `${outputLabel}_bordered`;
+    const borderAlphaExpression = `if(${outerRoundedExpression}\\,if(${innerRoundedExpression}\\,0\\,alpha(X\\,Y))\\,0)`;
+    filters.push(
+      `color=c=${ffmpegPanelColor(element.borderColor ?? "#ffffff", 100)}:s=${panelWidth}x${panelHeight}:r=${outputFps}:d=${clipDurationSeconds},${panelTiming}[${borderRingBaseLabel}]`,
+      `[${borderRingBaseLabel}]format=rgba,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='${borderAlphaExpression}'[${borderRingLabel}]`,
+      `[${currentLabel}][${borderRingLabel}]overlay=x=0:y=0:format=auto[${borderedLabel}]`,
+    );
+    currentLabel = borderedLabel;
+  }
+
+  if (radius > 0) {
+    const alphaExpression = `if(${outerRoundedExpression}\\,alpha(X\\,Y)\\,0)`;
+    filters.push(
+      `[${currentLabel}]format=rgba,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='${alphaExpression}'[${maskedLabel}]`,
+    );
+    currentLabel = maskedLabel;
+  }
+
+  const rotation = rotationRadians(element.rotation);
+  if (!rotation) {
+    filters.push(
+      panelScale > 1
+        ? `[${currentLabel}]scale=${width}:${height}:flags=lanczos[${outputLabel}]`
+        : `[${currentLabel}]null[${outputLabel}]`,
+    );
+    return filters;
+  }
+
+  const rotationCanvas = Math.ceil(Math.sqrt(width * width + height * height));
+  const highResolutionRotationCanvas = Math.ceil(Math.sqrt(panelWidth * panelWidth + panelHeight * panelHeight));
+  filters.push(
+    `[${currentLabel}]pad=${highResolutionRotationCanvas}:${highResolutionRotationCanvas}:(ow-iw)/2:(oh-ih)/2:color=black@0[${outputLabel}_padded]`,
+    `[${outputLabel}_padded]rotate=${rotation}:c=none:ow=iw:oh=ih[${outputLabel}_rotated]`,
+    panelScale > 1
+      ? `[${outputLabel}_rotated]scale=${rotationCanvas}:${rotationCanvas}:flags=lanczos[${outputLabel}]`
+      : `[${outputLabel}_rotated]null[${outputLabel}]`,
+  );
+  return filters;
 }
 
 function rotationRadians(rotation: number | undefined) {
@@ -1737,6 +2000,13 @@ function layoutStudioTimelineClips(template: CanvasLayoutTemplate | null | undef
   return Array.isArray(template?.compositionTimeline?.clips)
     ? template.compositionTimeline.clips
     : [];
+}
+
+function layoutStudioTimelineHasLayerType(
+  template: CanvasLayoutTemplate | null | undefined,
+  layerType: string,
+) {
+  return layoutStudioTimelineClips(template).some((clip) => clip.layerType === layerType);
 }
 
 function timelineClipEndSeconds(clip: { startSeconds?: number; durationSeconds?: number }) {
@@ -2110,17 +2380,21 @@ function layoutStudioTargetMediaAnchorPoint(
 function fitMediaIntoStudioElement(
   element: LayoutStudioResolvedElement,
   dimensions: MediaDimensions,
+  options: { rotateContainer?: boolean } = {},
 ) {
   const padding = clampNumber(element.padding, 0, Math.min(element.width, element.height) / 2, 0);
   const paddingX = clampNumber(element.paddingX, 0, element.width / 2, padding);
   const paddingY = clampNumber(element.paddingY, 0, element.height / 2, padding);
+  const borderWidth = element.containerOutline
+    ? clampNumber(element.borderWidth, 0, Math.min(element.width, element.height) / 2, 0)
+    : 0;
   const box = {
-    x: element.x + paddingX,
-    y: element.y + paddingY,
-    width: Math.max(1, element.width - paddingX * 2),
-    height: Math.max(1, element.height - paddingY * 2),
+    x: element.x + paddingX + borderWidth,
+    y: element.y + paddingY + borderWidth,
+    width: Math.max(1, element.width - (paddingX + borderWidth) * 2),
+    height: Math.max(1, element.height - (paddingY + borderWidth) * 2),
   };
-  const rotation = rotationRadians(element.rotation);
+  const rotation = options.rotateContainer ? null : rotationRadians(element.rotation);
   const fit = rotation ? "contain" : element.fit === "cover" ? "cover" : "contain";
   const scale = fit === "cover"
     ? Math.max(box.width / dimensions.width, box.height / dimensions.height)
@@ -2153,10 +2427,35 @@ function fitMediaIntoStudioElement(
         : (box.height - height) / 2;
   const x = Math.round(box.x + Math.max(0, horizontalOffset));
   const y = Math.round(box.y + Math.max(0, verticalOffset));
+  const unrotatedFilters = (inputLabel: string, output: string) => {
+    if (fit === "cover") {
+      const cropX =
+        element.horizontalAlign === "left"
+          ? "0"
+          : element.horizontalAlign === "right"
+            ? "iw-ow"
+            : "(iw-ow)/2";
+      const cropY =
+        element.verticalAlign === "top"
+          ? "0"
+          : element.verticalAlign === "bottom"
+            ? "ih-oh"
+            : "(ih-oh)/2";
+
+      return [
+        `${inputLabel}scale=${Math.round(box.width)}:${Math.round(box.height)}:force_original_aspect_ratio=increase,crop=${Math.round(box.width)}:${Math.round(box.height)}:${cropX}:${cropY},setsar=1,format=rgba[${output}]`,
+      ];
+    }
+
+    return [
+      `${inputLabel}scale=${width}:${height}:force_original_aspect_ratio=decrease,setsar=1,format=rgba[${output}]`,
+    ];
+  };
 
   return {
     x,
     y,
+    unrotatedFilters,
     filters(inputLabel: string, output: string) {
       const scaledOutput = `${output}_scaled`;
       const finish = (filter: string, renderedWidth: number, renderedHeight: number) => {
@@ -2174,31 +2473,11 @@ function fitMediaIntoStudioElement(
         ];
       };
 
-      if (fit === "cover") {
-        const cropX =
-          element.horizontalAlign === "left"
-            ? "0"
-            : element.horizontalAlign === "right"
-              ? "iw-ow"
-              : "(iw-ow)/2";
-        const cropY =
-          element.verticalAlign === "top"
-            ? "0"
-            : element.verticalAlign === "bottom"
-              ? "ih-oh"
-              : "(ih-oh)/2";
-
-        return finish(
-          `${inputLabel}scale=${Math.round(box.width)}:${Math.round(box.height)}:force_original_aspect_ratio=increase,crop=${Math.round(box.width)}:${Math.round(box.height)}:${cropX}:${cropY},setsar=1,format=rgba`,
-          Math.round(box.width),
-          Math.round(box.height),
-        );
-      }
-
+      const [unrotated] = unrotatedFilters(inputLabel, scaledOutput);
       return finish(
-        `${inputLabel}scale=${width}:${height}:force_original_aspect_ratio=decrease,setsar=1,format=rgba`,
-        width,
-        height,
+        unrotated.replace(`[${scaledOutput}]`, ""),
+        fit === "cover" ? Math.round(box.width) : width,
+        fit === "cover" ? Math.round(box.height) : height,
       );
     },
   };
@@ -2510,11 +2789,16 @@ async function createLayoutStudioTextOverlay({
     : desiredLineHeight;
   const maxWidth = Math.max(40, element.width - paddingX * 2 - textWrapPaddingX * 2);
   const maxHeight = Math.max(24, element.height - paddingY * 2 - textWrapPaddingY * 2);
-  const initialWrapped = wrapText(
+  const fontCandidates = fontCandidatesForStudioElement(element);
+  const initialWrapped = wrapStudioTextWithFontMetrics({
+    fontCandidates,
+    fontSize: desiredFontSize,
+    maxWidth,
+    outlineWidth,
     text,
-    charsPerLine(maxWidth, desiredFontSize),
-  );
+  });
   const fit = fitStudioTextForBox({
+    fontCandidates,
     lineHeight,
     maxHeight,
     maxWidth,
@@ -2541,7 +2825,7 @@ async function createLayoutStudioTextOverlay({
 
   return createTextOverlayImage({
     campaignId,
-    fontCandidates: fontCandidatesForStudioElement(element),
+    fontCandidates,
     fontSize: fit.fontSize,
     fontWeight: element.fontWeight ?? 700,
     height: Math.round(element.height + overlayPadding * 2),
@@ -3170,7 +3454,7 @@ async function renderSlideImage(input: {
   const elementByKey = new Map(
     resolvedElements.map((element) => [studioElementKey(element), element]),
   );
-  const args = ["-y", "-hide_banner", "-loglevel", "error"];
+  const args = ["-y", "-nostdin", "-hide_banner", "-nostats", "-loglevel", "fatal"];
   const sceneBackgroundFilepath =
     sceneAssetFilepath(input.scene.assets?.background) || input.backgroundFilepath;
 
@@ -3427,6 +3711,7 @@ function fitTextForBox(
 
 function fitStudioTextForBox({
   desiredFontSize,
+  fontCandidates,
   lineHeight,
   maxHeight,
   maxWidth,
@@ -3436,6 +3721,7 @@ function fitStudioTextForBox({
   wrappedText,
 }: {
   desiredFontSize: number;
+  fontCandidates: string[];
   lineHeight: number;
   maxHeight: number;
   maxWidth: number;
@@ -3447,11 +3733,17 @@ function fitStudioTextForBox({
   const normalized = normalizeTextForWrap(text);
 
   for (let fontSize = desiredFontSize; fontSize >= minFontSize; fontSize -= 1) {
-    const wrapped = wrapText(normalized, charsPerLine(maxWidth, fontSize));
+    const wrapped = wrapStudioTextWithFontMetrics({
+      fontCandidates,
+      fontSize,
+      maxWidth,
+      outlineWidth,
+      text: normalized,
+    });
     const lineCount = Math.max(1, wrapped.split("\n").length);
-    const estimatedHeight = lineCount * fontSize * lineHeight + outlineWidth * 2;
+    const estimatedHeight = lineCount * fontSize * lineHeight;
 
-    if (estimatedHeight <= maxHeight) {
+    if (estimatedHeight <= Math.max(1, maxHeight - outlineWidth * 2)) {
       return { fontSize, text: wrapped };
     }
   }
@@ -3460,6 +3752,84 @@ function fitStudioTextForBox({
     fontSize: minFontSize,
     text: wrappedText,
   };
+}
+
+function studioFontMetrics(fontCandidates: string[]) {
+  for (const filepath of fontCandidates) {
+    if (studioFontMetricsCache.has(filepath)) {
+      const cached = studioFontMetricsCache.get(filepath);
+      if (cached) return cached;
+      continue;
+    }
+
+    try {
+      const font = studioFontkit(fsSync.readFileSync(filepath));
+      studioFontMetricsCache.set(filepath, font);
+      return font;
+    } catch {
+      studioFontMetricsCache.set(filepath, null);
+    }
+  }
+
+  return null;
+}
+
+function studioTextWidth({
+  font,
+  fontSize,
+  text,
+}: {
+  font: StudioFontMetrics;
+  fontSize: number;
+  text: string;
+}) {
+  return (font.layout(text).advanceWidth / font.unitsPerEm) * fontSize;
+}
+
+export function wrapStudioTextWithFontMetrics({
+  fontCandidates,
+  fontSize,
+  maxWidth,
+  outlineWidth,
+  text,
+}: {
+  fontCandidates: string[];
+  fontSize: number;
+  maxWidth: number;
+  outlineWidth: number;
+  text: string;
+}) {
+  const font = studioFontMetrics(fontCandidates);
+  if (!font) {
+    return wrapText(text, charsPerLine(maxWidth, fontSize));
+  }
+
+  const availableWidth = Math.max(1, maxWidth - outlineWidth * 2);
+
+  return normalizeTextForWrap(text)
+    .split("\n")
+    .flatMap((paragraph) => {
+      const words = paragraph.split(/\s+/).filter(Boolean);
+      if (!words.length) return [""];
+
+      const lines: string[] = [];
+      let currentLine = words[0] ?? "";
+
+      for (let index = 1; index < words.length; index += 1) {
+        const word = words[index] ?? "";
+        const candidate = `${currentLine} ${word}`;
+        if (studioTextWidth({ font, fontSize, text: candidate }) <= availableWidth) {
+          currentLine = candidate;
+        } else {
+          lines.push(currentLine);
+          currentLine = word;
+        }
+      }
+
+      lines.push(currentLine);
+      return lines;
+    })
+    .join("\n");
 }
 
 function minimumWrappedLineHeight(fontSize: number, paddingY: number) {
@@ -3471,8 +3841,27 @@ function isLayoutStudioTextElement(element: LayoutStudioElement): element is Lay
 }
 
 function fontCandidatesForStudioElement(element: LayoutStudioElement) {
-  if (element.type === "hook") return hookFontCandidates();
-  return copyFontCandidates();
+  return studioFontCandidates(element.fontWeight ?? (element.type === "hook" ? 700 : 600));
+}
+
+function studioFontCandidates(fontWeight: number) {
+  const closestWeight = [300, 400, 500, 600, 700, 800, 900].reduce((closest, candidate) =>
+    Math.abs(candidate - fontWeight) < Math.abs(closest - fontWeight) ? candidate : closest,
+  600);
+  const fontByWeight: Record<number, string> = {
+    300: "TikTokSans-Light.ttf",
+    400: "TikTokSans-Regular.ttf",
+    500: "TikTokSans-Medium.ttf",
+    600: "TikTokSans-Semibold.ttf",
+    700: "TikTokSans-Bold.ttf",
+    800: "TikTokSans-ExtraBold.ttf",
+    900: "TikTokSans-Black.ttf",
+  };
+
+  return [
+    path.join(process.cwd(), "public", "fonts", fontByWeight[closestWeight] ?? "TikTokSans-Semibold.ttf"),
+    ...copyFontCandidates(),
+  ];
 }
 
 export function studioVideoTimelineDurationsForRender(
@@ -3787,8 +4176,11 @@ export async function renderJob(jobId: string) {
   }
 
   const hasThumbnailFile = await fileExists(job.thumbnail_filepath);
+  const studioTimelineOwnsCover = layoutStudioTimelineHasLayerType(studioTemplate, "cover");
   const hasCoverOverlay =
-    (isCoverLayout || Boolean(customCoverBox) || layoutStudioHasElement(studioTemplate, "cover")) &&
+    (isCoverLayout ||
+      Boolean(customCoverBox) ||
+      (layoutStudioHasElement(studioTemplate, "cover") && !studioTimelineOwnsCover)) &&
     hasThumbnailFile;
   const renderDurationSeconds = String(renderDuration);
   const outputFilename = `${job.id}.mp4`;
@@ -3916,7 +4308,16 @@ export async function renderJob(jobId: string) {
         })
     : null;
 
-  const args = ["-y", "-hide_banner", "-loglevel", "error"];
+  const args = [
+    "-y",
+    "-nostdin",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-progress",
+    "pipe:2",
+    "-nostats",
+  ];
 
   if (
     !preparedBackground.temporary &&
@@ -4061,6 +4462,18 @@ export async function renderJob(jobId: string) {
 
   const studioBackgroundOverlayInputs: StudioBackgroundOverlayInput[] = [];
   const studioMediaOverlayInputs: StudioMediaOverlayInput[] = [];
+  const studioTimelineGraph: Array<{
+    clipId?: string | null;
+    layerType: string;
+    elementId?: string | null;
+    startSeconds: number;
+    endSeconds: number;
+    assetId?: string | null;
+    assetType?: string | null;
+    filename?: string | null;
+    inputIndex?: number | null;
+    source: "background" | "preparedScreenshot" | "timelineAsset" | "missing";
+  }> = [];
   let resolvedStudioElements: LayoutStudioResolvedElement[] | undefined;
   let studioElementTimelineWindowInputs: StudioElementTimelineWindowsByElementId | undefined;
 
@@ -4100,6 +4513,18 @@ export async function renderJob(jobId: string) {
             jobId: job.id,
             filepath,
           });
+          studioTimelineGraph.push({
+            clipId: clip.id,
+            layerType,
+            elementId: clip.elementId,
+            startSeconds,
+            endSeconds,
+            assetId: resolved?.asset?.assetId ?? null,
+            assetType: resolved?.asset?.type ?? null,
+            filename: resolved?.asset?.filename ?? null,
+            inputIndex: 0,
+            source: "background",
+          });
           continue;
         }
 
@@ -4114,6 +4539,18 @@ export async function renderJob(jobId: string) {
           startSeconds,
           endSeconds,
         });
+        studioTimelineGraph.push({
+          clipId: clip.id,
+          layerType,
+          elementId: clip.elementId,
+          startSeconds,
+          endSeconds,
+          assetId: resolved?.asset?.assetId ?? null,
+          assetType: resolved?.asset?.type ?? null,
+          filename: resolved?.asset?.filename ?? null,
+          inputIndex: nextInputIndex,
+          source: "timelineAsset",
+        });
         nextInputIndex += 1;
         continue;
       }
@@ -4127,7 +4564,21 @@ export async function renderJob(jobId: string) {
 
       const filepath =
         resolved?.asset?.filepath ?? null;
-      if (!filepath || !(await fileExists(filepath))) continue;
+      if (!filepath || !(await fileExists(filepath))) {
+        studioTimelineGraph.push({
+          clipId: clip.id,
+          layerType,
+          elementId: clip.elementId ?? element.id ?? null,
+          startSeconds,
+          endSeconds,
+          assetId: resolved?.asset?.assetId ?? null,
+          assetType: resolved?.asset?.type ?? null,
+          filename: resolved?.asset?.filename ?? null,
+          inputIndex: null,
+          source: "missing",
+        });
+        continue;
+      }
       const dimensions = await getMediaDimensions(filepath).catch(() =>
         ({
           width: canvasWidth,
@@ -4148,8 +4599,41 @@ export async function renderJob(jobId: string) {
         startSeconds,
         endSeconds,
       });
+      studioTimelineGraph.push({
+        clipId: clip.id,
+        layerType,
+        elementId: clip.elementId ?? element.id ?? null,
+        startSeconds,
+        endSeconds,
+        assetId: resolved?.asset?.assetId ?? null,
+        assetType: resolved?.asset?.type ?? null,
+        filename: resolved?.asset?.filename ?? path.basename(filepath),
+        inputIndex: nextInputIndex,
+        source: "timelineAsset",
+      });
       nextInputIndex += 1;
     }
+  }
+
+  if (studioTemplate) {
+    console.log("Resolved Layout Studio render graph", {
+      jobId: job.id,
+      layoutTemplateId: renderOptions.layoutTemplateId ?? renderOptions.layoutTemplate ?? null,
+      renderDurationSeconds: renderDuration,
+      compositionDurationSeconds: layoutStudioCompositionDurationSeconds(studioTemplate),
+      timelineClips: studioTimelineGraph,
+      textOverlays: studioTextOverlayInputs.map((overlay) => ({
+        elementId: overlay.element.id ?? null,
+        elementType: overlay.element.type ?? null,
+        startSeconds: overlay.startSeconds ?? null,
+        endSeconds: overlay.endSeconds ?? null,
+        inputIndex: overlay.inputIndex,
+        width: overlay.width,
+        height: overlay.height,
+      })),
+      topLevelCoverOverlayEnabled: hasCoverOverlay,
+      studioTimelineOwnsCover,
+    });
   }
 
   const sceneVisualOverlayInputs: SceneVisualOverlayInput[] = [];
@@ -4483,7 +4967,25 @@ export async function renderJob(jobId: string) {
       filterComplexThreads: filterComplexThreads ?? "auto",
     });
 
-    await runCommand(ffmpegBinary, args, { ignoreOutput: true });
+    const progressLogger = createFfmpegProgressLogger(job.id);
+    const renderStartedAt = Date.now();
+    const heartbeat = setInterval(() => {
+      console.log("FFmpeg render heartbeat:", {
+        jobId: job.id,
+        elapsedSeconds: Math.round((Date.now() - renderStartedAt) / 1000),
+        ...progressLogger.snapshot(),
+      });
+    }, 60_000);
+
+    try {
+      await runCommand(ffmpegBinary, args, {
+        all: true,
+        maxBuffer: 128_000_000,
+        onStderrData: progressLogger.onStderrData,
+      });
+    } finally {
+      clearInterval(heartbeat);
+    }
 
     const [outputStat, outputDuration] = await Promise.all([
       fs.stat(outputFilepath),
