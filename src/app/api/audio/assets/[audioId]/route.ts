@@ -173,7 +173,7 @@ export async function GET(request: Request, context: AudioAssetContext) {
   }
 }
 
-export async function DELETE(_request: Request, context: AudioAssetContext) {
+export async function DELETE(request: Request, context: AudioAssetContext) {
   try {
     const { audioId } = await context.params;
     const deletedAudio = deleteUnusedAudioAsset(audioId);

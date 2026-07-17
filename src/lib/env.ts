@@ -42,7 +42,6 @@ function loadEnvFileIfPresent(filepath: string) {
   }
 }
 
-loadEnvFileIfPresent(path.resolve(process.cwd(), "../web-app/.env.local"));
 loadEnvFileIfPresent(path.resolve(process.cwd(), ".env.local"));
 
 const optionalString = z
@@ -74,6 +73,7 @@ const envSchema = z.object({
   GOOGLE_CLOUD_STORAGE_BUCKET: optionalString,
   AUTHORLOOM_PREVIEW_OBJECT_PREFIX: optionalString,
   GOOGLE_CLOUD_STORAGE_PREFIX: optionalString,
+  AUTHORLOOM_FACTORY_API_TOKEN: optionalString,
 });
 
 const parsedEnv = envSchema.safeParse(process.env);

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { renderJob } from "@/lib/ffmpeg";
+import { requireInternalApiAccess } from "@/lib/internal-api-auth";
 
 export const runtime = "nodejs";
 
@@ -10,7 +11,10 @@ type RenderJobRouteContext = {
   }>;
 };
 
-export async function POST(_request: Request, context: RenderJobRouteContext) {
+export async function POST(request: Request, context: RenderJobRouteContext) {
+  const unauthorized = requireInternalApiAccess(request);
+  if (unauthorized) return unauthorized;
+
   const { jobId } = await context.params;
 
   try {
