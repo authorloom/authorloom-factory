@@ -1176,6 +1176,7 @@ function buildImageTextFilterComplex({
   backgroundColorMetadata,
   layout,
   options,
+  renderDuration,
   screenshotDimensions,
   hookOverlayInputIndex,
   hookOverlays = [],
@@ -1195,6 +1196,7 @@ function buildImageTextFilterComplex({
   backgroundColorMetadata?: VideoColorMetadata | null;
   layout: Layout;
   options?: RenderOptions;
+  renderDuration?: number;
   screenshotDimensions: MediaDimensions;
   hookOverlayInputIndex?: number | null;
   hookOverlays?: HookOverlayInput[];
@@ -1396,18 +1398,34 @@ function buildImageTextFilterComplex({
     textFilters.push(`[${currentLabel}]null[${outputLabel}]`);
   }
 
-  const studioTimelineOwnsBackground = studioBackgroundOverlays.length > 0;
-  const baseFilters = studioTimelineOwnsBackground
-    ? [
-        `color=c=black:s=${canvasWidth}x${canvasHeight}:r=${outputFps}:d=${Math.max(
-          0.01,
-          effectiveOptions.durationSeconds ?? studioTimeline?.mainEndSeconds ?? 7,
-        ).toFixed(3)},format=yuv420p[bg_base]`,
-      ]
-    : [
-        `[0:v]setpts=${(1 / playbackSpeed).toFixed(5)}*PTS,${backgroundScaleFilter},crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY},setsar=1,format=yuv420p[bg_base]`,
-      ];
+  const customTemplate = customCanvasTemplate(effectiveOptions);
+  const studioTemplate = isSceneVideoPost ? null : layoutStudioTemplate(effectiveOptions);
+  const baseFilters: string[] = [];
   let backgroundLabel = "bg_base";
+
+  if (studioTemplate) {
+    const studioTimelineOwnsBackground = studioBackgroundOverlays.length > 0;
+    const studioBaseDuration = Math.max(
+      0.01,
+      renderDuration ??
+        layoutStudioCompositionDurationSeconds(studioTemplate) ??
+        clampNumber(effectiveOptions.durationSeconds, 0.1, 30, 7),
+    );
+    baseFilters.push(
+      `color=c=black:s=${canvasWidth}x${canvasHeight}:r=${outputFps}:d=${studioBaseDuration.toFixed(3)},setsar=1,format=yuv420p[bg_base]`,
+    );
+    if (!studioTimelineOwnsBackground) {
+      baseFilters.push(
+        `${finiteOverlayInputPrefix("[0:v]", 0, studioBaseDuration, playbackSpeed)}${backgroundScaleFilter},crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY},setsar=1,format=yuv420p[bg_primary]`,
+        `[bg_base][bg_primary]overlay=x=0:y=0${finiteOverlayOptions(0, studioBaseDuration)}[bg_primary_after]`,
+      );
+      backgroundLabel = "bg_primary_after";
+    }
+  } else {
+    baseFilters.push(
+      `[0:v]setpts=${(1 / playbackSpeed).toFixed(5)}*PTS,${backgroundScaleFilter},crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY},setsar=1,format=yuv420p[bg_base]`,
+    );
+  }
 
   studioBackgroundOverlays.forEach((overlay, index) => {
     const label = `studio_bg_${index}`;
@@ -1420,8 +1438,6 @@ function buildImageTextFilterComplex({
   });
 
   baseFilters.push(`[${backgroundLabel}]null[bg]`);
-  const customTemplate = customCanvasTemplate(effectiveOptions);
-  const studioTemplate = isSceneVideoPost ? null : layoutStudioTemplate(effectiveOptions);
 
   if (studioTemplate) {
     return buildLayoutStudioFilterComplex({
@@ -4712,6 +4728,7 @@ export async function renderJob(jobId: string) {
         footerHeight,
       },
     options: renderOptions,
+    renderDuration,
     screenshotDimensions,
     hookOverlayInputIndex,
     hookOverlays: timedHookOverlayInputs,
@@ -5010,6 +5027,7 @@ export async function renderJob(jobId: string) {
 
     try {
       await runCommand(ffmpegBinary, args, {
+        all: true,
         buffer: false,
         onStderrData: progressLogger.onStderrData,
       });
