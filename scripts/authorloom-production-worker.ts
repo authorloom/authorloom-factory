@@ -2319,6 +2319,29 @@ async function handleRenderTask(
   };
 
   if (!claimResult.success) {
+    const message = claimResult.message?.trim();
+    const canAcknowledgeTargetedStaleTask =
+      Boolean(body.productionJobId) &&
+      (!message ||
+        /already|claimed|another worker|not queued|not claimable|running|done|failed|cancelled/i.test(
+          message,
+        ));
+
+    if (canAcknowledgeTargetedStaleTask) {
+      console.log(
+        `Targeted Cloud Task ${body.productionJobId} could not claim a queued job (${message ?? "no message"}); treating as already handled.`,
+      );
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          ok: true,
+          claimed: false,
+          message: message ?? "Targeted job is no longer claimable.",
+        }),
+      );
+      return;
+    }
+
     throw new Error(claimResult.message ?? "Could not claim production job.");
   }
 
