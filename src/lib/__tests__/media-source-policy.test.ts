@@ -38,7 +38,7 @@ test("still image selects the fidelity-preserving source", () => {
   assert.equal(selected.mediaId, "original-image");
 });
 
-test("screenshot PNG preserves the source MIME selection", () => {
+test("screenshot uses JPEG render source for production when available", () => {
   const selected = selectProductionMediaSource({
     assetId: "screenshot-1",
     type: "screenshot",
@@ -48,8 +48,9 @@ test("screenshot PNG preserves the source MIME selection", () => {
     renderSourceMimeType: "image/jpeg",
   });
 
-  assert.equal(selected.mediaId, "transparent-png");
-  assert.equal(selected.mimeType, "image/png");
+  assert.equal(selected.mediaId, "flattened-preview");
+  assert.equal(selected.mimeType, "image/jpeg");
+  assert.equal(selected.purpose, "renderSource");
 });
 
 test("source media does not inherit render-source MIME metadata", () => {

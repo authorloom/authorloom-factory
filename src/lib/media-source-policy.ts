@@ -164,6 +164,15 @@ export function selectProductionMediaSource(asset: MediaSourceAsset): SelectedMe
     };
   }
 
+  if (
+    normalized(asset.type) === "screenshot" &&
+    renderSourceId &&
+    kindFromMime(asset.renderSourceMimeType) === "still" &&
+    normalized(asset.renderSourceMimeType) === "imagejpeg"
+  ) {
+    return { kind, purpose: "renderSource", mediaId: renderSourceId, url: renderSourceUrl, mimeType: clean(asset.renderSourceMimeType) };
+  }
+
   if (sourceId) {
     return { kind, purpose: "source", mediaId: sourceId, url: sourceUrl, mimeType: clean(asset.sourceMimeType) };
   }

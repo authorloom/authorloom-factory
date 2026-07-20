@@ -4570,6 +4570,31 @@ export async function renderJob(jobId: string) {
       if (layerType === "background") {
         const filepath = resolved?.asset?.filepath ?? null;
         if (!filepath || !(await fileExists(filepath))) continue;
+        const timelineUsesSelectedBackground =
+          path.resolve(filepath) === path.resolve(job.background_filepath) ||
+          path.basename(filepath) === path.basename(job.background_filepath);
+        if (timelineUsesSelectedBackground) {
+          studioBackgroundOverlayInputs.push({
+            inputIndex: 0,
+            height: canvasHeight,
+            isStillImage: isStillImageFile(preparedBackground.filepath),
+            startSeconds,
+            endSeconds,
+          });
+          studioTimelineGraph.push({
+            clipId: clip.id,
+            layerType,
+            elementId: clip.elementId,
+            startSeconds,
+            endSeconds,
+            assetId: resolved?.asset?.assetId ?? null,
+            assetType: resolved?.asset?.type ?? null,
+            filename: resolved?.asset?.filename ?? null,
+            inputIndex: 0,
+            source: "background",
+          });
+          continue;
+        }
         pushMediaInput(args, filepath, {
           durationSeconds: renderDurationSeconds,
           loop: true,
