@@ -401,6 +401,7 @@ async function runCommand(
   args: string[],
   options: {
     all?: boolean;
+    buffer?: boolean;
     ignoreOutput?: boolean;
     maxBuffer?: number;
     onStderrData?: (data: string) => void;
@@ -1369,9 +1370,17 @@ function buildImageTextFilterComplex({
     textFilters.push(`[${currentLabel}]null[${outputLabel}]`);
   }
 
-  const baseFilters = [
-    `[0:v]setpts=${(1 / playbackSpeed).toFixed(5)}*PTS,${backgroundScaleFilter},crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY},setsar=1,format=yuv420p[bg_base]`,
-  ];
+  const studioTimelineOwnsBackground = studioBackgroundOverlays.length > 0;
+  const baseFilters = studioTimelineOwnsBackground
+    ? [
+        `color=c=black:s=${canvasWidth}x${canvasHeight}:r=${outputFps}:d=${Math.max(
+          0.01,
+          effectiveOptions.durationSeconds ?? studioTimeline?.mainEndSeconds ?? 7,
+        ).toFixed(3)},format=yuv420p[bg_base]`,
+      ]
+    : [
+        `[0:v]setpts=${(1 / playbackSpeed).toFixed(5)}*PTS,${backgroundScaleFilter},crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY},setsar=1,format=yuv420p[bg_base]`,
+      ];
   let backgroundLabel = "bg_base";
 
   studioBackgroundOverlays.forEach((overlay, index) => {
@@ -4508,26 +4517,6 @@ export async function renderJob(jobId: string) {
       if (layerType === "background") {
         const filepath = resolved?.asset?.filepath ?? null;
         if (!filepath || !(await fileExists(filepath))) continue;
-        if (sameRenderFilepath(filepath, job.background_filepath)) {
-          console.log("Skipping duplicate Studio background overlay input", {
-            jobId: job.id,
-            filepath,
-          });
-          studioTimelineGraph.push({
-            clipId: clip.id,
-            layerType,
-            elementId: clip.elementId,
-            startSeconds,
-            endSeconds,
-            assetId: resolved?.asset?.assetId ?? null,
-            assetType: resolved?.asset?.type ?? null,
-            filename: resolved?.asset?.filename ?? null,
-            inputIndex: 0,
-            source: "background",
-          });
-          continue;
-        }
-
         pushMediaInput(args, filepath, {
           durationSeconds: renderDurationSeconds,
           loop: true,
@@ -4979,8 +4968,7 @@ export async function renderJob(jobId: string) {
 
     try {
       await runCommand(ffmpegBinary, args, {
-        all: true,
-        maxBuffer: 128_000_000,
+        buffer: false,
         onStderrData: progressLogger.onStderrData,
       });
     } finally {
