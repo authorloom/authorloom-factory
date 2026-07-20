@@ -76,6 +76,7 @@ type HookOverlayResult = {
 type OverlayInput = {
   inputIndex: number;
   height: number;
+  isStillImage?: boolean;
 };
 
 type CoverOverlayInput = OverlayInput & {
@@ -769,6 +770,31 @@ function finiteTimelineInputPrefix(
   return `${inputLabel}trim=start=0:duration=${duration.toFixed(3)},setpts=${(1 / speed).toFixed(5)}*(PTS-STARTPTS),${startPad}trim=start=0:duration=${endSeconds.toFixed(3)},setpts=PTS-STARTPTS,`;
 }
 
+function finiteStillTimelineInputPrefix(
+  inputLabel: string,
+  endSeconds: number,
+  playbackSpeed = 1,
+) {
+  const duration = Math.max(0.01, endSeconds);
+  const speed = clampNumber(playbackSpeed, 0.1, 10, 1);
+
+  return `${inputLabel}trim=start=0:duration=${duration.toFixed(3)},setpts=${(1 / speed).toFixed(5)}*(PTS-STARTPTS),trim=start=0:duration=${duration.toFixed(3)},setpts=PTS-STARTPTS,`;
+}
+
+function finiteOverlayInputPrefix(
+  inputLabel: string,
+  startSeconds: number,
+  endSeconds: number,
+  playbackSpeed = 1,
+  options: { isStillImage?: boolean } = {},
+) {
+  if (options.isStillImage) {
+    return finiteStillTimelineInputPrefix(inputLabel, endSeconds, playbackSpeed);
+  }
+
+  return finiteTimelineInputPrefix(inputLabel, startSeconds, endSeconds, playbackSpeed);
+}
+
 export function finiteLayoutStudioTimelineInputForRender(
   inputLabel: string,
   startSeconds: number,
@@ -1378,7 +1404,7 @@ function buildImageTextFilterComplex({
     const label = `studio_bg_${index}`;
     const afterLabel = `studio_bg_after_${index}`;
     baseFilters.push(
-      `${finiteTimelineInputPrefix(`[${overlay.inputIndex}:v]`, overlay.startSeconds, overlay.endSeconds, playbackSpeed)}${backgroundScaleFilter},crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY},setsar=1,format=yuv420p[${label}]`,
+      `${finiteOverlayInputPrefix(`[${overlay.inputIndex}:v]`, overlay.startSeconds, overlay.endSeconds, playbackSpeed, { isStillImage: overlay.isStillImage })}${backgroundScaleFilter},crop=${canvasWidth}:${canvasHeight}:${cropX}:${cropY},setsar=1,format=yuv420p[${label}]`,
       `[${backgroundLabel}][${label}]overlay=x=0:y=0${finiteOverlayOptions(overlay.startSeconds, overlay.endSeconds)}[${afterLabel}]`,
     );
     backgroundLabel = afterLabel;
@@ -1616,10 +1642,12 @@ function buildLayoutStudioFilterComplex({
             width: overlay.width,
             height: overlay.height,
           }, { rotateContainer: hasContainer });
-          const inputPrefix = finiteTimelineInputPrefix(
+          const inputPrefix = finiteOverlayInputPrefix(
             `[${overlay.inputIndex}:v]`,
             overlay.startSeconds,
             overlay.endSeconds,
+            1,
+            { isStillImage: overlay.isStillImage },
           );
           filters.push(
             ...(hasContainer
@@ -1649,10 +1677,12 @@ function buildLayoutStudioFilterComplex({
         );
         const enable = elementEnable(element);
         const inputPrefix = studioTimeline
-          ? finiteTimelineInputPrefix(
+          ? finiteOverlayInputPrefix(
               `[${coverOverlay.inputIndex}:v]`,
               studioTimeline.mainStartSeconds,
               studioTimeline.mainEndSeconds,
+              1,
+              { isStillImage: coverOverlay.isStillImage },
             )
           : `[${coverOverlay.inputIndex}:v]`;
         filters.push(
@@ -1686,10 +1716,12 @@ function buildLayoutStudioFilterComplex({
       });
       const enable = elementEnable(element);
       const inputPrefix = studioTimeline
-        ? finiteTimelineInputPrefix(
+        ? finiteOverlayInputPrefix(
             "[1:v]",
             studioTimeline.mainStartSeconds,
             studioTimeline.mainEndSeconds,
+            1,
+            { isStillImage: true },
           )
         : "[1:v]";
       filters.push(
@@ -1722,10 +1754,12 @@ function buildLayoutStudioFilterComplex({
             : mainEnable;
         const inputPrefix =
           typeof overlay.startSeconds === "number" && typeof overlay.endSeconds === "number"
-            ? finiteTimelineInputPrefix(
+            ? finiteOverlayInputPrefix(
                 `[${overlay.inputIndex}:v]`,
                 overlay.startSeconds,
                 overlay.endSeconds,
+                1,
+                { isStillImage: overlay.isStillImage },
               )
             : `[${overlay.inputIndex}:v]`;
         filters.push(
@@ -1750,7 +1784,7 @@ function buildLayoutStudioFilterComplex({
     const label = `studio_${key}_timeline`;
     const afterLabel = `studio_${key}_after`;
     filters.push(
-      `${finiteTimelineInputPrefix(`[${overlay.inputIndex}:v]`, overlay.startSeconds, overlay.endSeconds)}scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight}:(iw-ow)/2:(ih-oh)/2,setsar=1,format=rgba[${label}]`,
+      `${finiteOverlayInputPrefix(`[${overlay.inputIndex}:v]`, overlay.startSeconds, overlay.endSeconds, 1, { isStillImage: overlay.isStillImage })}scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase,crop=${canvasWidth}:${canvasHeight}:(iw-ow)/2:(ih-oh)/2,setsar=1,format=rgba[${label}]`,
       `[${currentLabel}][${label}]overlay=x=0:y=0${finiteOverlayOptions(overlay.startSeconds, overlay.endSeconds)}[${afterLabel}]`,
     );
     currentLabel = afterLabel;
@@ -3484,6 +3518,7 @@ async function renderSlideImage(input: {
     studioMediaOverlayInputs.push({
       element,
       inputIndex: nextInputIndex,
+      isStillImage: isStillImageFile(filepath),
       width: dimensions.width,
       height: dimensions.height,
       startSeconds: 0,
@@ -3523,6 +3558,7 @@ async function renderSlideImage(input: {
       element: resolvedElement,
       height: overlay.height,
       inputIndex: nextInputIndex,
+      isStillImage: true,
       startSeconds: 0,
       endSeconds: 1,
       width: overlay.width,
@@ -4452,6 +4488,7 @@ export async function renderJob(jobId: string) {
         element: overlay.element,
         height: overlay.height,
         inputIndex: nextInputIndex,
+        isStillImage: true,
         startSeconds: overlay.startSeconds,
         endSeconds: overlay.endSeconds,
         width: overlay.width,
@@ -4536,6 +4573,7 @@ export async function renderJob(jobId: string) {
         studioBackgroundOverlayInputs.push({
           inputIndex: nextInputIndex,
           height: canvasHeight,
+          isStillImage: isStillImageFile(filepath),
           startSeconds,
           endSeconds,
         });
@@ -4594,6 +4632,7 @@ export async function renderJob(jobId: string) {
       studioMediaOverlayInputs.push({
         element,
         inputIndex: nextInputIndex,
+        isStillImage: isStillImageFile(filepath),
         width: dimensions.width,
         height: dimensions.height,
         startSeconds,
@@ -4694,6 +4733,7 @@ export async function renderJob(jobId: string) {
       hasCoverOverlay && coverInputIndex !== null && job.thumbnail_filepath
         ? {
             inputIndex: coverInputIndex,
+            isStillImage: isStillImageFile(job.thumbnail_filepath),
             ...(await getMediaDimensions(job.thumbnail_filepath)),
           }
         : null,
@@ -4724,6 +4764,7 @@ export async function renderJob(jobId: string) {
               ? {
                   inputIndex: introInputIndex,
                   height: canvasHeight,
+                  isStillImage: isStillImageFile(introFilepath),
                   width: canvasWidth,
                   startSeconds: 0,
                   endSeconds: studioMainStartSeconds,
@@ -4734,6 +4775,7 @@ export async function renderJob(jobId: string) {
               ? {
                   inputIndex: outroInputIndex,
                   height: canvasHeight,
+                  isStillImage: isStillImageFile(outroFilepath),
                   width: canvasWidth,
                   startSeconds: studioMainStartSeconds + studioMainDuration,
                   endSeconds: renderDuration,
