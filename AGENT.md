@@ -87,7 +87,17 @@ Add or update tests for graph timing, media source selection, and output duratio
 ## Production Safety
 
 - Do not deploy production unless explicitly asked.
+- Production factory images must be built only from current `origin/main` or a hotfix branch based on current `origin/main`.
+- Before every production image build or deploy, run:
+
+```bash
+pnpm deploy:assert-production-base
+```
+
+- If that command reports any commits in `HEAD..origin/main`, stop. Rebase or cherry-pick the hotfix onto current `origin/main` first.
+- Never deploy from archived, local-only, stale, or deleted-remote hotfix branches.
 - Confirm Google Cloud project, region, service, image tag, and environment before deploying.
+- After deploying Cloud Run, verify the latest ready revision is serving 100% traffic and that the service image tag/digest matches the image you just built.
 - Do not alter or rotate secrets casually.
 - Do not remove required environment variables.
 - If the factory call contract changes, coordinate the Convex/web release order.

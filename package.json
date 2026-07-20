@@ -22,7 +22,8 @@
     "emoji:sync-noto": "node scripts/sync-noto-emoji-assets.mjs",
     "upload:drive-worker": "tsx scripts/upload-drive-videos-worker.ts",
     "storage:cleanup": "tsx scripts/cleanup-render-storage.ts --execute",
-    "storage:cleanup:dry-run": "tsx scripts/cleanup-render-storage.ts"
+    "storage:cleanup:dry-run": "tsx scripts/cleanup-render-storage.ts",
+    "deploy:assert-production-base": "node scripts/assert-production-deploy-base.mjs"
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
