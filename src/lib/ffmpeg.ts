@@ -430,11 +430,20 @@ function createFfmpegProgressLogger(jobId: string) {
   let buffer = "";
   let lastLoggedAt = 0;
   const progress: Record<string, string> = {};
+  const recentDiagnostics: string[] = [];
   const snapshot = () => ({
     frame: progress.frame ?? null,
     outTimeMs: progress.out_time_ms ?? null,
     speed: progress.speed ?? null,
   });
+  const rememberDiagnostic = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    recentDiagnostics.push(trimmed);
+    if (recentDiagnostics.length > 30) {
+      recentDiagnostics.shift();
+    }
+  };
 
   return {
     onStderrData(data: string) {
@@ -443,9 +452,17 @@ function createFfmpegProgressLogger(jobId: string) {
       buffer = lines.pop() ?? "";
       for (const line of lines) {
         const separator = line.indexOf("=");
-        if (separator < 1) continue;
+        if (separator < 1) {
+          rememberDiagnostic(line);
+          continue;
+        }
         const key = line.slice(0, separator);
-        progress[key] = line.slice(separator + 1);
+        const value = line.slice(separator + 1);
+        if (!["frame", "fps", "stream_0_0_q", "bitrate", "total_size", "out_time_us", "out_time_ms", "out_time", "dup_frames", "drop_frames", "speed", "progress"].includes(key)) {
+          rememberDiagnostic(line);
+          continue;
+        }
+        progress[key] = value;
         if (key !== "progress") continue;
         const now = Date.now();
         if (progress[key] === "end" || now - lastLoggedAt >= 15_000) {
@@ -458,6 +475,7 @@ function createFfmpegProgressLogger(jobId: string) {
         }
       }
     },
+    diagnostics: () => [...recentDiagnostics],
     snapshot,
   };
 }
@@ -725,6 +743,17 @@ async function detectRasterImageKind(filepath: string) {
   }
 }
 
+export function rasterImageKindFromExtension(filepath: string) {
+  const extension = path.extname(filepath).toLowerCase();
+  if (extension === ".jpg" || extension === ".jpeg") return "jpeg";
+  if (extension === ".png") return "png";
+  if (extension === ".gif") return "gif";
+  if (extension === ".webp") return "webp";
+  if (extension === ".avif") return "avif";
+  if (extension === ".heic" || extension === ".heif") return "heic";
+  return null;
+}
+
 function isStillImageFile(filepath: string) {
   return [".avif", ".gif", ".jpeg", ".jpg", ".png", ".webp"].includes(
     path.extname(filepath).toLowerCase(),
@@ -952,10 +981,29 @@ async function prepareScreenshotForRender({
   jobId: string;
   screenshotFilepath: string;
 }) {
-  const imageKind = await detectRasterImageKind(screenshotFilepath);
+  const detectedImageKind = await detectRasterImageKind(screenshotFilepath);
+  const extensionImageKind = rasterImageKindFromExtension(screenshotFilepath);
+  const imageKind = detectedImageKind ?? extensionImageKind;
+
+  if (extensionImageKind && detectedImageKind !== extensionImageKind) {
+    console.warn("Screenshot image kind detection fell back to file extension", {
+      jobId,
+      screenshotFilepath,
+      detectedImageKind,
+      extensionImageKind,
+    });
+  }
 
   if (!isHeicFile(screenshotFilepath)) {
     if (imageKind === "jpeg") {
+      if (extensionImageKind !== "jpeg") {
+        return prepareMislabeledJpegScreenshotForRender({
+          campaignId,
+          jobId,
+          screenshotFilepath,
+        });
+      }
+
       return {
         filepath: screenshotFilepath,
         temporary: false,
@@ -1020,6 +1068,46 @@ async function prepareScreenshotForRender({
   throw new Error(
     `Could not convert HEIC screenshot for render.\n${errors.join("\n\n")}`,
   );
+}
+
+async function prepareMislabeledJpegScreenshotForRender({
+  campaignId,
+  jobId,
+  screenshotFilepath,
+}: {
+  campaignId: string;
+  jobId: string;
+  screenshotFilepath: string;
+}) {
+  const sourceDimensions = await getMediaDimensions(screenshotFilepath);
+  const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
+  const outputFilepath = path.join(tempDirectory, `${jobId}-screenshot-normalized.jpg`);
+
+  await fs.mkdir(tempDirectory, { recursive: true });
+  await fs.copyFile(screenshotFilepath, outputFilepath);
+
+  const copiedDimensions = await getMediaDimensions(outputFilepath);
+  if (
+    copiedDimensions.width !== sourceDimensions.width ||
+    copiedDimensions.height !== sourceDimensions.height
+  ) {
+    throw new Error(
+      `Copied mislabeled JPEG screenshot dimensions changed from ${sourceDimensions.width}x${sourceDimensions.height} to ${copiedDimensions.width}x${copiedDimensions.height}.`,
+    );
+  }
+
+  console.log("Normalized mislabeled JPEG screenshot extension for render", {
+    jobId,
+    source: screenshotFilepath,
+    output: outputFilepath,
+    width: copiedDimensions.width,
+    height: copiedDimensions.height,
+  });
+
+  return {
+    filepath: outputFilepath,
+    temporary: true,
+  };
 }
 
 async function prepareNonJpegScreenshotForRender({
@@ -5041,6 +5129,7 @@ export async function renderJob(jobId: string) {
       timeoutMs: ffmpegTimeoutMs,
     },
   };
+  const progressLogger = createFfmpegProgressLogger(job.id);
 
   try {
     console.log("Authorloom factory render diagnostics", renderDiagnosticContext);
@@ -5074,7 +5163,6 @@ export async function renderJob(jobId: string) {
       filterComplexThreads: filterComplexThreads ?? "auto",
     });
 
-    const progressLogger = createFfmpegProgressLogger(job.id);
     const renderStartedAt = Date.now();
     const heartbeat = setInterval(() => {
       console.log("FFmpeg render heartbeat:", {
@@ -5124,6 +5212,7 @@ export async function renderJob(jobId: string) {
     console.error("Authorloom factory render failure diagnostics", {
       jobId: job.id,
       message,
+      ffmpegDiagnostics: progressLogger.diagnostics(),
       renderDiagnosticContext,
     });
     markRenderJobFailed(job.id, message);
