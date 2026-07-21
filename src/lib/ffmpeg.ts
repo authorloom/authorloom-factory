@@ -996,6 +996,14 @@ async function prepareScreenshotForRender({
 
   if (!isHeicFile(screenshotFilepath)) {
     if (imageKind === "jpeg") {
+      if (extensionImageKind !== "jpeg") {
+        return prepareMislabeledJpegScreenshotForRender({
+          campaignId,
+          jobId,
+          screenshotFilepath,
+        });
+      }
+
       return {
         filepath: screenshotFilepath,
         temporary: false,
@@ -1060,6 +1068,46 @@ async function prepareScreenshotForRender({
   throw new Error(
     `Could not convert HEIC screenshot for render.\n${errors.join("\n\n")}`,
   );
+}
+
+async function prepareMislabeledJpegScreenshotForRender({
+  campaignId,
+  jobId,
+  screenshotFilepath,
+}: {
+  campaignId: string;
+  jobId: string;
+  screenshotFilepath: string;
+}) {
+  const sourceDimensions = await getMediaDimensions(screenshotFilepath);
+  const tempDirectory = path.join(paths.rendersDirectory, campaignId, ".tmp");
+  const outputFilepath = path.join(tempDirectory, `${jobId}-screenshot-normalized.jpg`);
+
+  await fs.mkdir(tempDirectory, { recursive: true });
+  await fs.copyFile(screenshotFilepath, outputFilepath);
+
+  const copiedDimensions = await getMediaDimensions(outputFilepath);
+  if (
+    copiedDimensions.width !== sourceDimensions.width ||
+    copiedDimensions.height !== sourceDimensions.height
+  ) {
+    throw new Error(
+      `Copied mislabeled JPEG screenshot dimensions changed from ${sourceDimensions.width}x${sourceDimensions.height} to ${copiedDimensions.width}x${copiedDimensions.height}.`,
+    );
+  }
+
+  console.log("Normalized mislabeled JPEG screenshot extension for render", {
+    jobId,
+    source: screenshotFilepath,
+    output: outputFilepath,
+    width: copiedDimensions.width,
+    height: copiedDimensions.height,
+  });
+
+  return {
+    filepath: outputFilepath,
+    temporary: true,
+  };
 }
 
 async function prepareNonJpegScreenshotForRender({
