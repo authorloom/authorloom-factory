@@ -9,11 +9,18 @@ import {
   layoutStudioCompositionDurationSeconds,
   layoutStudioElementTimelineWindows,
   primaryLayoutStudioScreenshotElementKey,
+  rasterImageKindFromExtension,
   resolveLayoutStudioElementsForRender,
   resolveLayoutStudioSceneTextElementForRender,
   studioVideoTimelineDurationsForRender,
   wrapStudioTextWithFontMetrics,
 } from "../ffmpeg";
+
+test("screenshot image kind detection can fall back to file extensions", () => {
+  assert.equal(rasterImageKindFromExtension("/tmp/screenshot.PNG"), "png");
+  assert.equal(rasterImageKindFromExtension("/tmp/screenshot.jpeg"), "jpeg");
+  assert.equal(rasterImageKindFromExtension("/tmp/screenshot.unknown"), null);
+});
 
 test("delayed Layout Studio inputs use finite continuous timestamps", () => {
   const filter = finiteLayoutStudioTimelineInputForRender("[4:v]", 5, 7);

@@ -743,6 +743,17 @@ async function detectRasterImageKind(filepath: string) {
   }
 }
 
+export function rasterImageKindFromExtension(filepath: string) {
+  const extension = path.extname(filepath).toLowerCase();
+  if (extension === ".jpg" || extension === ".jpeg") return "jpeg";
+  if (extension === ".png") return "png";
+  if (extension === ".gif") return "gif";
+  if (extension === ".webp") return "webp";
+  if (extension === ".avif") return "avif";
+  if (extension === ".heic" || extension === ".heif") return "heic";
+  return null;
+}
+
 function isStillImageFile(filepath: string) {
   return [".avif", ".gif", ".jpeg", ".jpg", ".png", ".webp"].includes(
     path.extname(filepath).toLowerCase(),
@@ -970,7 +981,18 @@ async function prepareScreenshotForRender({
   jobId: string;
   screenshotFilepath: string;
 }) {
-  const imageKind = await detectRasterImageKind(screenshotFilepath);
+  const detectedImageKind = await detectRasterImageKind(screenshotFilepath);
+  const extensionImageKind = rasterImageKindFromExtension(screenshotFilepath);
+  const imageKind = detectedImageKind ?? extensionImageKind;
+
+  if (extensionImageKind && detectedImageKind !== extensionImageKind) {
+    console.warn("Screenshot image kind detection fell back to file extension", {
+      jobId,
+      screenshotFilepath,
+      detectedImageKind,
+      extensionImageKind,
+    });
+  }
 
   if (!isHeicFile(screenshotFilepath)) {
     if (imageKind === "jpeg") {
