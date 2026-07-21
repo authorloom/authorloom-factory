@@ -430,11 +430,20 @@ function createFfmpegProgressLogger(jobId: string) {
   let buffer = "";
   let lastLoggedAt = 0;
   const progress: Record<string, string> = {};
+  const recentDiagnostics: string[] = [];
   const snapshot = () => ({
     frame: progress.frame ?? null,
     outTimeMs: progress.out_time_ms ?? null,
     speed: progress.speed ?? null,
   });
+  const rememberDiagnostic = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    recentDiagnostics.push(trimmed);
+    if (recentDiagnostics.length > 30) {
+      recentDiagnostics.shift();
+    }
+  };
 
   return {
     onStderrData(data: string) {
@@ -443,9 +452,17 @@ function createFfmpegProgressLogger(jobId: string) {
       buffer = lines.pop() ?? "";
       for (const line of lines) {
         const separator = line.indexOf("=");
-        if (separator < 1) continue;
+        if (separator < 1) {
+          rememberDiagnostic(line);
+          continue;
+        }
         const key = line.slice(0, separator);
-        progress[key] = line.slice(separator + 1);
+        const value = line.slice(separator + 1);
+        if (!["frame", "fps", "stream_0_0_q", "bitrate", "total_size", "out_time_us", "out_time_ms", "out_time", "dup_frames", "drop_frames", "speed", "progress"].includes(key)) {
+          rememberDiagnostic(line);
+          continue;
+        }
+        progress[key] = value;
         if (key !== "progress") continue;
         const now = Date.now();
         if (progress[key] === "end" || now - lastLoggedAt >= 15_000) {
@@ -458,6 +475,7 @@ function createFfmpegProgressLogger(jobId: string) {
         }
       }
     },
+    diagnostics: () => [...recentDiagnostics],
     snapshot,
   };
 }
@@ -5041,6 +5059,7 @@ export async function renderJob(jobId: string) {
       timeoutMs: ffmpegTimeoutMs,
     },
   };
+  const progressLogger = createFfmpegProgressLogger(job.id);
 
   try {
     console.log("Authorloom factory render diagnostics", renderDiagnosticContext);
@@ -5074,7 +5093,6 @@ export async function renderJob(jobId: string) {
       filterComplexThreads: filterComplexThreads ?? "auto",
     });
 
-    const progressLogger = createFfmpegProgressLogger(job.id);
     const renderStartedAt = Date.now();
     const heartbeat = setInterval(() => {
       console.log("FFmpeg render heartbeat:", {
@@ -5124,6 +5142,7 @@ export async function renderJob(jobId: string) {
     console.error("Authorloom factory render failure diagnostics", {
       jobId: job.id,
       message,
+      ffmpegDiagnostics: progressLogger.diagnostics(),
       renderDiagnosticContext,
     });
     markRenderJobFailed(job.id, message);
