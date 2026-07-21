@@ -3,6 +3,7 @@ import test from "node:test";
 import path from "node:path";
 
 import {
+  finiteLayoutStudioStillInputForRender,
   finiteLayoutStudioTimelineInputForRender,
   isLayoutStudioTimelineMediaOverlayLayer,
   layoutStudioCompositionDurationSeconds,
@@ -21,6 +22,15 @@ test("delayed Layout Studio inputs use finite continuous timestamps", () => {
   assert.match(filter, /trim=start=0:duration=2\.000/);
   assert.match(filter, /tpad=start_duration=5\.000:start_mode=clone/);
   assert.match(filter, /trim=start=0:duration=7\.000/);
+});
+
+test("Layout Studio still inputs clone one decoded frame into a finite stream", () => {
+  const filter = finiteLayoutStudioStillInputForRender("[4:v]", 8);
+
+  assert.match(filter, /trim=start=0:duration=0\.033/);
+  assert.match(filter, /tpad=stop_mode=clone:stop_duration=8\.000/);
+  assert.match(filter, /trim=start=0:duration=8\.000/);
+  assert.doesNotMatch(filter, new RegExp(String.raw`\\+\\d+(?:\\.\\d+)?/TB`));
 });
 
 const screenshotElement = {
