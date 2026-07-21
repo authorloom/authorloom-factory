@@ -734,16 +734,29 @@ function isStillImageFile(filepath: string) {
 function pushMediaInput(
   args: string[],
   filepath: string,
-  options: { durationSeconds?: number | string; loop?: boolean; loopStillImage?: boolean } = {},
+  options: {
+    durationSeconds?: number | string;
+    loop?: boolean;
+    loopStillImage?: boolean;
+    singleFrameStillImage?: boolean;
+  } = {},
 ) {
-  if (options.loop && !isStillImageFile(filepath)) {
+  const isStillImage = isStillImageFile(filepath);
+  const singleFrameStillImage = Boolean(
+    options.singleFrameStillImage && options.loopStillImage && isStillImage,
+  );
+
+  if (options.loop && !isStillImage) {
     args.push("-stream_loop", "-1");
   }
-  if (options.durationSeconds !== undefined) {
+  if (options.durationSeconds !== undefined && !singleFrameStillImage) {
     args.push("-t", String(options.durationSeconds));
   }
-  if (options.loopStillImage && isStillImageFile(filepath)) {
-    args.push("-f", "image2", "-framerate", String(outputFps), "-loop", "1");
+  if (options.loopStillImage && isStillImage) {
+    args.push("-f", "image2", "-framerate", String(outputFps));
+    if (!singleFrameStillImage) {
+      args.push("-loop", "1");
+    }
   }
   args.push("-i", filepath);
 }
@@ -778,8 +791,9 @@ function finiteStillTimelineInputPrefix(
 ) {
   const duration = Math.max(0.01, endSeconds);
   const speed = clampNumber(playbackSpeed, 0.1, 10, 1);
+  const sourceFrameDuration = Math.max(0.001, 1 / outputFps);
 
-  return `${inputLabel}trim=start=0:duration=${duration.toFixed(3)},setpts=${(1 / speed).toFixed(5)}*(PTS-STARTPTS),trim=start=0:duration=${duration.toFixed(3)},setpts=PTS-STARTPTS,`;
+  return `${inputLabel}trim=start=0:duration=${sourceFrameDuration.toFixed(3)},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=${duration.toFixed(3)},trim=start=0:duration=${duration.toFixed(3)},setpts=${(1 / speed).toFixed(5)}*(PTS-STARTPTS),trim=start=0:duration=${duration.toFixed(3)},setpts=PTS-STARTPTS,`;
 }
 
 function finiteOverlayInputPrefix(
@@ -802,6 +816,13 @@ export function finiteLayoutStudioTimelineInputForRender(
   endSeconds: number,
 ) {
   return finiteTimelineInputPrefix(inputLabel, startSeconds, endSeconds);
+}
+
+export function finiteLayoutStudioStillInputForRender(
+  inputLabel: string,
+  endSeconds: number,
+) {
+  return finiteStillTimelineInputPrefix(inputLabel, endSeconds);
 }
 
 function finiteOverlayOptions(startSeconds: number, endSeconds: number) {
@@ -4244,6 +4265,7 @@ export async function renderJob(jobId: string) {
       (layoutStudioHasElement(studioTemplate, "cover") && !studioTimelineOwnsCover)) &&
     hasThumbnailFile;
   const renderDurationSeconds = String(renderDuration);
+  const useSingleFrameStudioStills = Boolean(studioTemplate);
   const outputFilename = `${job.id}.mp4`;
   const outputDirectory = path.join(paths.rendersDirectory, job.campaign_id);
   const outputFilepath = path.join(outputDirectory, outputFilename);
@@ -4393,11 +4415,13 @@ export async function renderJob(jobId: string) {
     durationSeconds: requiredBackgroundInputDuration.toFixed(3),
     loop: backgroundIsStillImage || (!preparedBackground.temporary && shouldLoopBackgroundVideo),
     loopStillImage: backgroundIsStillImage,
+    singleFrameStillImage: useSingleFrameStudioStills,
   });
   pushMediaInput(args, preparedScreenshot.filepath, {
     durationSeconds: renderDurationSeconds,
     loop: true,
     loopStillImage: true,
+    singleFrameStillImage: useSingleFrameStudioStills,
   });
 
   let nextInputIndex = 2;
@@ -4409,6 +4433,7 @@ export async function renderJob(jobId: string) {
       durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
+      singleFrameStillImage: useSingleFrameStudioStills,
     });
     nextInputIndex += 1;
   }
@@ -4421,6 +4446,7 @@ export async function renderJob(jobId: string) {
         durationSeconds: renderDurationSeconds,
         loop: true,
         loopStillImage: true,
+        singleFrameStillImage: useSingleFrameStudioStills,
       });
       timedHookOverlayInputs.push({
         element: "element" in overlay ? overlay.element : null,
@@ -4442,6 +4468,7 @@ export async function renderJob(jobId: string) {
       durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
+      singleFrameStillImage: useSingleFrameStudioStills,
     });
     nextInputIndex += 1;
   }
@@ -4455,6 +4482,7 @@ export async function renderJob(jobId: string) {
       durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
+      singleFrameStillImage: useSingleFrameStudioStills,
     });
     nextInputIndex += 1;
   }
@@ -4466,6 +4494,7 @@ export async function renderJob(jobId: string) {
       durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
+      singleFrameStillImage: useSingleFrameStudioStills,
     });
     nextInputIndex += 1;
   }
@@ -4481,6 +4510,7 @@ export async function renderJob(jobId: string) {
       durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
+      singleFrameStillImage: useSingleFrameStudioStills,
     });
     nextInputIndex += 1;
   }
@@ -4496,6 +4526,7 @@ export async function renderJob(jobId: string) {
       durationSeconds: renderDurationSeconds,
       loop: true,
       loopStillImage: true,
+      singleFrameStillImage: useSingleFrameStudioStills,
     });
     nextInputIndex += 1;
   }
@@ -4508,6 +4539,7 @@ export async function renderJob(jobId: string) {
         durationSeconds: renderDurationSeconds,
         loop: true,
         loopStillImage: true,
+        singleFrameStillImage: useSingleFrameStudioStills,
       });
       studioTextOverlayInputs.push({
         element: overlay.element,
@@ -4599,6 +4631,7 @@ export async function renderJob(jobId: string) {
           durationSeconds: renderDurationSeconds,
           loop: true,
           loopStillImage: true,
+          singleFrameStillImage: useSingleFrameStudioStills,
         });
         studioBackgroundOverlayInputs.push({
           inputIndex: nextInputIndex,
@@ -4658,6 +4691,7 @@ export async function renderJob(jobId: string) {
         durationSeconds: renderDurationSeconds,
         loop: true,
         loopStillImage: true,
+        singleFrameStillImage: useSingleFrameStudioStills,
       });
       studioMediaOverlayInputs.push({
         element,
